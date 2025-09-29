@@ -17,34 +17,42 @@ classdef Zarr < handle
         isRemote
     end
 
-
     methods(Static)
         function pySetup
-            % Load the Python library
+            % Set up Python path
             
             % Python module setup and bootstrapping to MATLAB
             fullPath = mfilename('fullpath');
             zarrDirectory = fileparts(fullPath);
-            modpath = fullfile(zarrDirectory, 'PythonModule');
-            % Add the current folder to the Python search path
-            if count(py.sys.path,modpath) == 0
-                insert(py.sys.path,int32(0),modpath);
-            end
-            
-            % Check if the ZarrPy module is loaded already. If not, load
-            % it.
-            try
-                sys = py.importlib.import_module('sys');
-                loadedModuleNames = string( py.list( sys.modules.keys() ) );
-                requiresZarrPyReload = ~any(loadedModuleNames == "ZarrPy");
-            catch
-                requiresZarrPyReload = true;
-            end
 
-            if requiresZarrPyReload
-                zarrModule = py.importlib.import_module('ZarrPy');
-                py.importlib.reload(zarrModule);
+            zarrPyPath = fullfile(zarrDirectory, 'PythonModule');
+            % Add ZarrPy to the Python search path if it is not there
+            % already
+            if count(py.sys.path,zarrPyPath) == 0
+                insert(py.sys.path,int32(0),zarrPyPath);
             end
+        end
+
+        function zarrPy = ZarrPy()
+            % Get ZarrPy Python module
+
+            % Python will compile and cache the module after the first call
+            % to import_module, so there is no harm in making this call
+            % multiple times.
+            zarrPy = py.importlib.import_module('ZarrPy');
+        end
+
+        function pyReloadInProcess()
+            % Reload ZarrPy module after it has been modified (for
+            % In-Process Python only). Need to do `clear classes` before
+            % this call. For Out-of-Process Python, can just use
+            % `terminate(pyenv)` instead.
+
+            % make sure the python module is on the path
+            Zarr.pySetup()
+
+            % reload
+            py.importlib.reload(Zarr.ZarrPy);
         end
 
         function isZarray = isZarrArray(path)
@@ -57,6 +65,53 @@ classdef Zarr < handle
             % Given a path, determine if it is a Zarr group
 
             isZgroup = isfile(fullfile(path, '.zgroup'));
+        end
+
+        function newParams = processPartialReadParams(params, dims,...
+                defaultValues, paramName)
+            % Process the parameters for partial read (Start, Stride,
+            % Count)
+            arguments (Input)
+                params % Start/Stride/Count parameter to be validated
+                dims (1,:) double  % Zarr array dimensions
+                defaultValues (1,:) 
+                paramName (1,1) string 
+            end
+
+            arguments (Output)
+                newParams (1,:) int64 % must be integers for tensorstore
+            end
+            
+            if isempty(params)
+                newParams = defaultValues;
+                return
+            end
+
+            % Allow using a scalar value for indexing into row or column
+            % datasets
+            if isscalar(params) && any(dims==1) && numel(dims)==2
+                newParams = defaultValues;
+                % use the provided value for the non-scalar dimension
+                newParams(dims~=1) = params;
+                return
+            end
+
+            if numel(params) ~= numel(dims)
+                error("MATLAB:Zarr:badPartialReadDimensions",...
+                    "Number of elements in " +...
+                    "%s must be the same "+...
+                    "as the number of Zarr array dimensions.",...
+                    paramName)
+            end
+
+            if any(params>dims)
+                error("MATLAB:Zarr:PartialReadOutOfBounds",...
+                    "Elements in %s must not exceed "+...
+                    "the corresponding Zarr array dimensions.",...
+                    paramName)
+            end
+
+            newParams = params;
         end
 
         function resolvedPath = getFullPath(path)
@@ -228,7 +283,7 @@ classdef Zarr < handle
                 % Extract the S3 bucket name and path
                 [bucketName, objectPath] = Zarr.extractS3BucketNameAndPath(obj.Path);
                 % Create a Python dictionary for the KV store driver
-                obj.KVStoreSchema = py.ZarrPy.createKVStore(obj.isRemote, objectPath, bucketName);
+                obj.KVStoreSchema = Zarr.ZarrPy.createKVStore(obj.isRemote, objectPath, bucketName);
                 
             else % Local file
                 % Use full path
@@ -238,12 +293,12 @@ classdef Zarr < handle
                     error("MATLAB:Zarr:invalidPath",...
                         "Unable to access path ""%s"".", path)
                 end
-                obj.KVStoreSchema = py.ZarrPy.createKVStore(obj.isRemote, obj.Path);
+                obj.KVStoreSchema = Zarr.ZarrPy.createKVStore(obj.isRemote, obj.Path);
             end
         end
 
         
-        function data = read(obj)
+        function data = read(obj, start, count, stride)
             % Function to read the Zarr array
 
             % If the Zarr array is local, verify that it is a valid folder
@@ -257,10 +312,49 @@ classdef Zarr < handle
                 end
             end
 
-            ndArrayData = py.ZarrPy.readZarr(obj.KVStoreSchema);
+            % Validate partial read parameters
+            info = zarrinfo(obj.Path);
+            numDims = numel(info.shape);
+            start = Zarr.processPartialReadParams(start, info.shape,...
+                ones([1,numDims]), "Start");
+            stride = Zarr.processPartialReadParams(stride, info.shape,...
+                ones([1,numDims]), "Stride"); 
+            maxCount = (int64(info.shape') - start + 1)./stride; % has to be a row vector
+            count = Zarr.processPartialReadParams(count, info.shape,...
+                maxCount, "Count"); 
+
+            if any(count>maxCount)
+                error("MATLAB:Zarr:PartialReadOutOfBounds",...
+                    "Requested Count in combination with other "+...
+                    "parameters exceeds Zarr array dimensions.")
+            end
+
+            % Convert partial read parameters to tensorstore-style
+            % indexing
+            start = start - 1; % tensorstore is 0-based
+            % Tensorstore uses end index instead of count
+            % (it does NOT include element at the end index)
+            endInds = start + stride.*count;
 
             % Store the datatype
-            obj.Datatype = ZarrDatatype.fromTensorstoreType(ndArrayData.dtype.name);
+            obj.Datatype = ZarrDatatype.fromZarrType(info.dtype);
+
+            % Check if reading requested data might exceed available memory
+            try
+                zeros(count, obj.Datatype.MATLABType);
+            catch ME
+                if strcmp(ME.identifier, 'MATLAB:array:SizeLimitExceeded')
+                    error("MATLAB:Zarr:OutOfMemory",...
+                        "Reading requested data (%s %s array) "+...
+                        "would exceed maximum array size preference. "+...
+                        "Select a smaller subset of data to read.",...
+                        join(string(count), "-by-"), obj.Datatype.MATLABType)
+                end
+            end
+
+            % Read the data
+            ndArrayData = Zarr.ZarrPy.readZarr(obj.KVStoreSchema,...
+                start, endInds, stride);
 
             % Convert the numpy array to MATLAB array
             data = cast(ndArrayData, obj.Datatype.MATLABType);
@@ -309,7 +403,7 @@ classdef Zarr < handle
 
             % The Python function returns the Tensorstore schema, but we
             % do not use it for anything at the moment.
-            obj.TensorstoreSchema = py.ZarrPy.createZarr(obj.KVStoreSchema, py.numpy.array(obj.DsetSize),...
+            obj.TensorstoreSchema = Zarr.ZarrPy.createZarr(obj.KVStoreSchema, py.numpy.array(obj.DsetSize),...
                 py.numpy.array(obj.ChunkSize), obj.Datatype.TensorstoreType, ...
                  obj.Datatype.ZarrType, obj.Compression, obj.FillValue);
             %py.ZarrPy.temp(py.numpy.array([1, 1]), py.numpy.array([2, 2]))
@@ -346,7 +440,7 @@ classdef Zarr < handle
                     "Unable to write data. Size of the data to be written must match size of the array.");
             end
             
-            py.ZarrPy.writeZarr(obj.KVStoreSchema, data);
+            Zarr.ZarrPy.writeZarr(obj.KVStoreSchema, data);
         end
 
     end
