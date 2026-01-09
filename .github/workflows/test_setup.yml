@@ -11,7 +11,7 @@ jobs:
     strategy:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-14]
-        matlab-version: ['R2024a']
+        matlab-version: ['R2024a','latest']
 
     steps:
     - name: Checkout code
