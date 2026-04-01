@@ -158,11 +158,110 @@ classdef tZarrWrite < SharedZarrTestSetup
             testcase.verifyEqual(actData,expData,'Failed to verify array data')
         end
 
+        function writeArrayV3(testcase)
+            % Verify full writes to a Zarr v3 array.
+            expData = single(reshape(1:prod(testcase.ArrSize), testcase.ArrSize));
+            zarrcreate(testcase.ArrPathWrite, testcase.ArrSize, ...
+                Datatype='single', ZarrFormat=3);
+
+            zarrwrite(testcase.ArrPathWrite, expData);
+
+            actData = zarrread(testcase.ArrPathWrite);
+            testcase.verifyEqual(actData, expData, ...
+                'Failed to verify full write to a Zarr v3 array.');
+        end
+
+        function partialWriteArrayV3(testcase)
+            % Verify partial writes into a Zarr v3 array.
+            fillValue = single(-7);
+            patchData = single(reshape(1:6, [2 3]));
+            expData = fillValue * ones(testcase.ArrSize, 'single');
+            expData(2:3, 4:6) = patchData;
+
+            zarrcreate(testcase.ArrPathWrite, testcase.ArrSize, ...
+                Datatype='single', FillValue=fillValue, ChunkSize=[4 5], ZarrFormat=3);
+            zarrwrite(testcase.ArrPathWrite, patchData, Start=[2 4]);
+
+            actData = zarrread(testcase.ArrPathWrite);
+            testcase.verifyEqual(actData, expData, ...
+                'Failed to verify partial write to a Zarr v3 array.');
+        end
+
+        function partialWriteChunkEdgeV3(testcase)
+            % Verify partial writes can span chunk boundaries in v3.
+            zarrcreate(testcase.ArrPathWrite, [6 6], Datatype='single', ...
+                ChunkSize=[3 3], ZarrFormat=3);
+
+            patchData = single(reshape(1:9, [3 3]));
+            zarrwrite(testcase.ArrPathWrite, patchData, Start=[3 3]);
+
+            actData = zarrread(testcase.ArrPathWrite, Start=[3 3], Count=[3 3]);
+            testcase.verifyEqual(actData, patchData, ...
+                'Failed to verify chunk-edge partial write for a Zarr v3 array.');
+        end
+
+        function partialWriteArrayV2(testcase)
+            % Verify partial writes also work for existing v2 arrays.
+            zarrcreate(testcase.ArrPathWrite, testcase.ArrSize);
+            zarrwrite(testcase.ArrPathWrite, ones(testcase.ArrSize));
+
+            patchData = 2 * ones(2, 3);
+            zarrwrite(testcase.ArrPathWrite, patchData, Start=[2 4]);
+
+            actData = zarrread(testcase.ArrPathWrite, Start=[2 4], Count=[2 3]);
+            testcase.verifyEqual(actData, patchData, ...
+                'Failed to verify partial write for a Zarr v2 array.');
+        end
+
+        function matlabWriteV3ReadableFromPython(testcase)
+            % Verify MATLAB-created v3 data is readable through the Python
+            % TensorStore layer.
+            expData = single(reshape(1:prod(testcase.ArrSize), testcase.ArrSize));
+            zarrcreate(testcase.ArrPathWrite, testcase.ArrSize, ...
+                Datatype='single', ZarrFormat=3);
+            zarrwrite(testcase.ArrPathWrite, expData);
+
+            actData = testcase.readV3ArrayViaPython(testcase.ArrPathWrite);
+            testcase.verifyEqual(actData, expData, ...
+                'Failed to verify Python/TensorStore interoperability for v3 writes.');
+        end
+
         function writeToNonExistentArray(testcase)
             % Try writing to a Zarr array which has not been created yet
-            errID = 'MATLAB:zarrinfo:invalidZarrObject';
+            errID = 'MATLAB:Zarr:invalidZarrObject';
             data = rand(10);
             testcase.verifyError(@()zarrwrite('nonExistentArray.zarr',data),errID);
+        end
+
+        function partialWriteOutOfBounds(testcase)
+            % Verify out-of-bounds partial writes are rejected.
+            zarrcreate(testcase.ArrPathWrite, testcase.ArrSize, ZarrFormat=3);
+            data = ones(3, 3);
+            testcase.verifyError(@() zarrwrite(testcase.ArrPathWrite, data, ...
+                Start=[19 24]), 'MATLAB:Zarr:PartialWriteOutOfBounds');
+        end
+    end
+
+    methods(Access = private)
+        function data = readV3ArrayViaPython(~, filepath)
+            % Read a v3 array directly through the Python TensorStore helper.
+            info = zarrinfo(filepath);
+            kvstore = Zarr.ZarrPy.createKVStore(false, Zarr.getFullPath(filepath));
+            metadata = struct( ...
+                "zarr_format", 3, ...
+                "node_type", "array", ...
+                "shape", reshape(double(info.shape), 1, []), ...
+                "data_type", char(string(info.data_type)), ...
+                "chunk_grid", info.chunk_grid, ...
+                "chunk_key_encoding", info.chunk_key_encoding, ...
+                "codecs", info.codecs, ...
+                "fill_value", info.fill_value);
+            metadataJSON = jsonencode(metadata);
+
+            shape = reshape(double(info.shape), 1, []);
+            pyData = Zarr.ZarrPy.readZarr(kvstore, int64(zeros(size(shape))), ...
+                int64(shape), int64(ones(size(shape))), "zarr3", metadataJSON);
+            data = cast(pyData, char(ZarrDatatype.fromV3Type(string(info.data_type)).MATLABType));
         end
     end
 end

@@ -86,6 +86,7 @@ arguments
     options.Datatype {mustBeTextScalar, mustBeNonempty} = 'double'
     options.FillValue {mustBeNumericOrLogical} = []
     options.Compression {mustBeStructOrEmpty} = []
+    options.ZarrFormat (1,1) double {mustBeMember(options.ZarrFormat, [2 3])} = 2
 end
 
 % Dimensionality of the dataset and the chunk size must be the same
@@ -104,7 +105,8 @@ if isscalar(datasize)
 end
 
 zarrObj = Zarr(filepath);
-zarrObj.create(options.Datatype, datasize, options.ChunkSize, options.FillValue, options.Compression)
+zarrObj.create(options.Datatype, datasize, options.ChunkSize, ...
+    options.FillValue, options.Compression, options.ZarrFormat)
 
 end
 

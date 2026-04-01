@@ -29,7 +29,7 @@ classdef tZarrCreate < SharedZarrTestSetup
         function createIntermediateZgroups(testcase)
             % Verify that zarrcreate creates zarr groups when given a
             % nested path
-            arrayPath = fullfile(testcase.ArrPathWrite, "A", "B");
+            arrayPath = fullfile(testcase.GrpPathWrite, "v3", "A", "B", "arr");
             zarrcreate(arrayPath, testcase.ArrSize);
             [groupPath, ~, ~] = fileparts(arrayPath);
 
@@ -60,6 +60,57 @@ classdef tZarrCreate < SharedZarrTestSetup
             arrInfo = zarrinfo(inpPath);
             testcase.verifyEqual(arrInfo.zarr_format,2,'Failed to verify Zarr array format');
             testcase.verifyEqual(arrInfo.node_type,'array','Unexpected Zarr array node type');
+        end
+
+        function createDefaultArrayV3(testcase)
+            % Verify that zarrcreate can build a Zarr v3 array with the
+            % default portable codec profile.
+            zarrcreate(testcase.ArrPathWrite, testcase.ArrSize, ZarrFormat=3);
+
+            actInfo = zarrinfo(testcase.ArrPathWrite);
+            testcase.verifyEqual(actInfo.zarr_format, 3);
+            testcase.verifyEqual(actInfo.node_type, 'array');
+            testcase.verifyEqual(actInfo.shape(:), testcase.ArrSize');
+            testcase.verifyEqual(string(actInfo.data_type), "float64");
+            testcase.verifyEqual(actInfo.chunk_shape(:), testcase.ArrSize');
+            testcase.verifyEqual(string(actInfo.chunk_key_encoding.name), "default");
+            testcase.verifyEqual(actInfo.fill_value, 0);
+            testcase.verifyEqual({actInfo.codecs.name}, {'bytes', 'gzip'});
+            testcase.verifyEqual(string(actInfo.codecs(1).configuration.endian), "little");
+            testcase.verifyEqual(actInfo.codecs(2).configuration.level, 1);
+        end
+
+        function createIntermediateZgroupsV3(testcase)
+            % Verify nested v3 array creation uses v3 group metadata for
+            % intermediate directories.
+            arrayPath = fullfile(testcase.GrpPathWrite, "A", "B", "arr");
+            zarrcreate(arrayPath, testcase.ArrSize, ZarrFormat=3);
+            [groupPath, ~, ~] = fileparts(arrayPath);
+
+            testcase.verifyTrue(isfile(fullfile(groupPath, "zarr.json")), ...
+                "zarr.json file was not created")
+            testcase.verifyFalse(isfile(fullfile(groupPath, ".zgroup")), ...
+                "Unexpected v2 .zgroup file was created for a v3 hierarchy")
+
+            grpInfo = zarrinfo(groupPath);
+            testcase.verifyEqual(grpInfo.zarr_format, 3, ...
+                "Unexpected Zarr group format");
+            testcase.verifyEqual(grpInfo.node_type, 'group', ...
+                "Unexpected Zarr group node type");
+        end
+
+        function createArrayV3LegacyCompressionSyntax(testcase)
+            % Verify v3 creation maps the legacy Compression syntax onto
+            % the supported bytes + gzip codec chain.
+            compression.id = 'gzip';
+            compression.level = 5;
+
+            zarrcreate(testcase.ArrPathWrite, testcase.ArrSize, ...
+                Compression=compression, ZarrFormat=3);
+
+            actInfo = zarrinfo(testcase.ArrPathWrite);
+            testcase.verifyEqual({actInfo.codecs.name}, {'bytes', 'gzip'});
+            testcase.verifyEqual(actInfo.codecs(2).configuration.level, 5);
         end
 
         function invalidFilePath(testcase)
@@ -207,11 +258,28 @@ classdef tZarrCreate < SharedZarrTestSetup
             % Verify error when an invalid type for the fill value is used.
 
             testcase.verifyError(@()zarrcreate(testcase.ArrPathWrite,testcase.ArrSize, ...
-                "FillValue",[-9 -9]),testcase.PyException);
+                "FillValue",[-9 -9]),'MATLAB:zarrcreate:invalidFillValueType');
             testcase.verifyError(@()zarrcreate(testcase.ArrPathWrite,testcase.ArrSize, ...
                 "FillValue","none"),'MATLAB:validators:mustBeNumericOrLogical');
             testcase.verifyError(@()zarrcreate(testcase.ArrPathWrite,testcase.ArrSize,...
                 Datatype="int8", FillValue=1.4), 'MATLAB:zarrcreate:invalidFillValueType')
+        end
+
+        function invalidZarrFormat(testcase)
+            % Verify unsupported ZarrFormat values are rejected.
+            testcase.verifyError(@() zarrcreate(testcase.ArrPathWrite, testcase.ArrSize, ...
+                ZarrFormat=4), 'MATLAB:validators:mustBeMember');
+        end
+
+        function invalidV3CodecChain(testcase)
+            % Verify unsupported v3 codec chains are rejected early.
+            codecs = [ ...
+                struct("name", "bytes", "configuration", struct("endian", "little")), ...
+                struct("name", "zstd", "configuration", struct("level", 1))];
+
+            testcase.verifyError(@() zarrcreate(testcase.ArrPathWrite, testcase.ArrSize, ...
+                Compression=codecs, ZarrFormat=3), ...
+                'MATLAB:Zarr:unsupportedV3CodecChain');
         end
 
         function specialFillValue(testcase)

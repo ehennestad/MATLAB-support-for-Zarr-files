@@ -223,7 +223,7 @@ classdef Zarr < handle
             store.writeText(metadataFile, groupJSON);
         end
 
-        function makeZarrGroups(existingParentPath, newGroupsPath)
+        function makeZarrGroups(existingParentPath, newGroupsPath, zarrFormat)
             % Create a hierarchy of nested Zarr groups for all directories
             % in newGroupsPath. For example, if existingParentPath is
             % "/Users/jsmith/Documents" and newGroupsPath is
@@ -240,6 +240,7 @@ classdef Zarr < handle
             arguments (Input)
                 existingParentPath (1,1) string
                 newGroupsPath (1,1) string
+                zarrFormat (1,1) double {mustBeMember(zarrFormat, [2 3])} = 2
             end
 
             newGroups = split(newGroupsPath, filesep);
@@ -249,7 +250,7 @@ classdef Zarr < handle
                     continue
                 end
                 pathToNewGroup = fullfile(existingParentPath, group);
-                Zarr.createGroup(pathToNewGroup);
+                Zarr.createGroup(pathToNewGroup, zarrFormat);
                 existingParentPath = pathToNewGroup;
             end
 
@@ -347,7 +348,7 @@ classdef Zarr < handle
             % (it does NOT include element at the end index)
             endInds = start + stride.*count;
 
-            [driver, metadataJSON] = obj.getReadTensorStoreSpec(info);
+            [driver, metadataJSON] = obj.getTensorStoreSpec(info);
 
             % Store the datatype
             obj.Datatype = ZarrDatatype.fromMetadataType( ...
@@ -374,32 +375,16 @@ classdef Zarr < handle
             data = cast(ndArrayData, obj.Datatype.MATLABType);
         end
 
-        function create(obj, dtype, data_size, chunk_size, fillvalue, compression)
+        function create(obj, dtype, data_size, chunk_size, fillvalue, compression, zarrFormat)
             % Function to create the Zarr array
+            if nargin < 7
+                zarrFormat = 2;
+            end
 
             obj.DsetSize = int64(data_size);
             obj.ChunkSize = int64(chunk_size);
             obj.Datatype = ZarrDatatype.fromMATLABType(dtype);
-
-            % If compression is empty, it means no compression
-            if isempty(compression)
-                obj.Compression = py.None;
-            else
-                obj.Compression = obj.parseCompression(compression);
-            end
-
-            % Fill Value
-            if isempty(fillvalue)
-                obj.FillValue = py.None;
-            else
-                % Fill value must be of the same datatype as data.
-                if ~isa(fillvalue, dtype)
-                    error("MATLAB:zarrcreate:invalidFillValueType",...
-                        "Fill value must have the same data type (""%s"") as the Zarr array.",...
-                        dtype)
-                end
-                obj.FillValue = fillvalue;
-            end
+            obj.FillValue = obj.validateFillValue(fillvalue, dtype, zarrFormat);
             
             % see how much of the provided path exists already 
             existingParentPath = Zarr.getExistingParentFolder(obj.Path);
@@ -415,12 +400,30 @@ classdef Zarr < handle
                     "Unable to access path ""%s"".", obj.Path)
             end
 
-            % The Python function returns the Tensorstore schema, but we
-            % do not use it for anything at the moment.
-            obj.TensorstoreSchema = Zarr.ZarrPy.createZarr(obj.KVStoreSchema, py.numpy.array(obj.DsetSize),...
-                py.numpy.array(obj.ChunkSize), obj.Datatype.TensorstoreType, ...
-                 obj.Datatype.ZarrType, obj.Compression, obj.FillValue);
-            %py.ZarrPy.temp(py.numpy.array([1, 1]), py.numpy.array([2, 2]))
+            obj.validateCreateParent(existingParentPath);
+
+            if zarrFormat == 2
+                % If compression is empty, it means no compression.
+                if isempty(compression)
+                    obj.Compression = py.None;
+                else
+                    obj.Compression = obj.parseCompression(compression);
+                end
+
+                obj.TensorstoreSchema = Zarr.ZarrPy.createZarr( ...
+                    obj.KVStoreSchema, py.numpy.array(obj.DsetSize), ...
+                    py.numpy.array(obj.ChunkSize), obj.Datatype.TensorstoreType, ...
+                    obj.Datatype.ZarrType, obj.Compression, obj.FillValue);
+            else
+                if obj.isRemote
+                    error("MATLAB:ZarrStore:unsupportedLocation", ...
+                        "Filesystem-only operation. Remote Zarr stores are not supported here.");
+                end
+
+                obj.Compression = obj.parseV3Compression(compression);
+                metadataJSON = obj.buildV3MetadataJSON();
+                obj.TensorstoreSchema = Zarr.ZarrPy.createZarr3(obj.KVStoreSchema, metadataJSON);
+            end
 
             % if new directories were created as part of creating a
             % Zarr array, we need to make them into Zarr groups.
@@ -429,32 +432,50 @@ classdef Zarr < handle
             % Zarr groups
             [newGroups, ~,~] = fileparts(newDirs);
             if newGroups ~= ""
-                Zarr.makeZarrGroups(existingParentPath, newGroups);
+                Zarr.makeZarrGroups(existingParentPath, newGroups, zarrFormat);
             end
 
 
         end
 
-        function write(obj, data)
+        function write(obj, data, start)
             % Function to write to the Zarr array
+            if nargin < 3
+                start = [];
+            end
 
-            % Read the Array info
-            info = zarrinfo(obj.Path);
-            datasize = size(data);
-            % Verify if the data to be written is of correct dimensions
-            if isscalar(info.shape)
-                isCorrectShape = (numel(data) == info.shape);
-                
+            info = obj.getArrayInfo();
+            arrayShape = reshape(int64(info.shape), 1, []);
+            dataSize = int64(obj.normalizeDataSize(size(data), double(arrayShape)));
+
+            if isempty(start)
+                isCorrectShape = isequal(arrayShape, dataSize);
             else
-                isCorrectShape = isequal(info.shape, datasize(:));
+                start = Zarr.processPartialReadParams(start, info.shape, ...
+                    ones([1, numel(arrayShape)]), "Start");
+                endInds = start + dataSize - 1;
+                if any(endInds > arrayShape)
+                    error("MATLAB:Zarr:PartialWriteOutOfBounds", ...
+                        "Requested write region exceeds Zarr array dimensions.")
+                end
+                isCorrectShape = true;
             end
 
             if ~isCorrectShape
                 error("MATLAB:Zarr:sizeMismatch",...
                     "Unable to write data. Size of the data to be written must match size of the array.");
             end
+
+            [driver, metadataJSON] = obj.getTensorStoreSpec(info);
             
-            Zarr.ZarrPy.writeZarr(obj.KVStoreSchema, data);
+            if isempty(start)
+                Zarr.ZarrPy.writeZarr(obj.KVStoreSchema, data, driver, metadataJSON);
+            else
+                start = start - 1;
+                endInds = start + dataSize;
+                Zarr.ZarrPy.writeZarrRegion(obj.KVStoreSchema, data, ...
+                    start, endInds, driver, metadataJSON);
+            end
         end
 
     end
@@ -479,8 +500,8 @@ classdef Zarr < handle
             end
         end
 
-        function [driver, metadataJSON] = getReadTensorStoreSpec(~, info)
-            % Build the TensorStore read spec from normalized metadata.
+        function [driver, metadataJSON] = getTensorStoreSpec(~, info)
+            % Build the TensorStore spec from normalized metadata.
             metadataJSON = "";
 
             if info.zarr_format == 2
@@ -548,6 +569,160 @@ classdef Zarr < handle
                     error("MATLAB:Zarr:invalidCompressionID",...
                         "Invalid compression id. Specify compression id as ""zlib"", ""gzip"", ""blosc"", ""bz2"", or ""zstd"".");
             end
+        end
+
+        function fillValue = validateFillValue(~, fillvalue, dtype, zarrFormat)
+            % Validate and normalize the fill value for the requested format.
+            if isempty(fillvalue)
+                if zarrFormat == 2
+                    fillValue = py.None;
+                else
+                    fillValue = cast(0, dtype);
+                end
+                return
+            end
+
+            if ~isscalar(fillvalue) || ~isa(fillvalue, dtype)
+                error("MATLAB:zarrcreate:invalidFillValueType",...
+                    "Fill value must have the same data type (""%s"") as the Zarr array.",...
+                    dtype)
+            end
+
+            fillValue = fillvalue;
+        end
+
+        function validateCreateParent(obj, existingParentPath)
+            % Prevent creating arrays inside incompatible existing Zarr nodes.
+            if obj.Path == existingParentPath
+                return
+            end
+
+            try
+                parentInfo = zarrinfo(existingParentPath);
+            catch ME
+                if strcmp(ME.identifier, 'MATLAB:zarrinfo:invalidZarrObject')
+                    return
+                end
+                rethrow(ME)
+            end
+
+            if strcmp(string(parentInfo.node_type), "array")
+                error("MATLAB:Zarr:invalidParentPath", ...
+                    "Cannot create a Zarr array inside an existing Zarr array path.");
+            end
+        end
+
+        function dataSize = normalizeDataSize(~, inputSize, arrayShape)
+            % Normalize MATLAB size output so it can be compared with Zarr shapes.
+            dataSize = reshape(double(inputSize), 1, []);
+            targetDims = numel(arrayShape);
+
+            if numel(dataSize) < targetDims
+                dataSize(end+1:targetDims) = 1;
+            elseif numel(dataSize) > targetDims
+                extraDims = dataSize(targetDims+1:end);
+                if any(extraDims ~= 1)
+                    return
+                end
+                dataSize = dataSize(1:targetDims);
+            end
+        end
+
+        function codecs = parseV3Compression(obj, compression)
+            % Validate the supported v3 codec chain.
+            if isempty(compression)
+                codecs = obj.getDefaultV3Codecs();
+                return
+            end
+
+            if isfield(compression, 'id')
+                compression = obj.mapLegacyCompressionToV3Codecs(compression);
+            end
+
+            if ~(isstruct(compression) && all(isfield(compression, 'name')))
+                error("MATLAB:Zarr:unsupportedV3CodecChain", ...
+                    "Supported Zarr v3 codecs are limited to a bytes + gzip chain.");
+            end
+
+            codecs = obj.validateV3CodecChain(compression);
+        end
+
+        function codecs = mapLegacyCompressionToV3Codecs(~, compression)
+            % Support a small v3-compatible subset of the legacy Compression syntax.
+            if ~isfield(compression, 'id') || string(compression.id) ~= "gzip"
+                error("MATLAB:Zarr:unsupportedV3CodecChain", ...
+                    "Supported Zarr v3 codecs are limited to a bytes + gzip chain.");
+            end
+
+            level = 1;
+            if isfield(compression, 'level')
+                level = compression.level;
+            end
+
+            codecs = [ ...
+                struct("name", "bytes", "configuration", struct("endian", "little")), ...
+                struct("name", "gzip", "configuration", struct("level", level))];
+        end
+
+        function codecs = validateV3CodecChain(~, codecs)
+            % Normalize and validate the supported v3 codec chain.
+            if numel(codecs) ~= 2
+                error("MATLAB:Zarr:unsupportedV3CodecChain", ...
+                    "Supported Zarr v3 codecs are limited to a bytes + gzip chain.");
+            end
+
+            bytesCodec = codecs(1);
+            gzipCodec = codecs(2);
+
+            if string(bytesCodec.name) ~= "bytes"
+                error("MATLAB:Zarr:unsupportedV3CodecChain", ...
+                    "The first Zarr v3 codec must be the bytes codec.");
+            end
+
+            if ~isfield(bytesCodec, 'configuration') || ~isfield(bytesCodec.configuration, 'endian')
+                bytesCodec.configuration = struct("endian", "little");
+            end
+            if string(bytesCodec.configuration.endian) ~= "little"
+                error("MATLAB:Zarr:unsupportedV3CodecChain", ...
+                    "Only little-endian Zarr v3 bytes codecs are supported.");
+            end
+
+            if string(gzipCodec.name) ~= "gzip"
+                error("MATLAB:Zarr:unsupportedV3CodecChain", ...
+                    "The second Zarr v3 codec must be the gzip codec.");
+            end
+
+            if ~isfield(gzipCodec, 'configuration') || ~isfield(gzipCodec.configuration, 'level')
+                gzipCodec.configuration = struct("level", 1);
+            end
+
+            codecs = [bytesCodec, gzipCodec];
+        end
+
+        function codecs = getDefaultV3Codecs(~)
+            % Return the portable default codec chain for Zarr v3 arrays.
+            codecs = [ ...
+                struct("name", "bytes", "configuration", struct("endian", "little")), ...
+                struct("name", "gzip", "configuration", struct("level", 1))];
+        end
+
+        function metadataJSON = buildV3MetadataJSON(obj)
+            % Build a TensorStore-compatible metadata document for Zarr v3 creation.
+            metadata = struct( ...
+                "zarr_format", 3, ...
+                "node_type", "array", ...
+                "shape", reshape(double(obj.DsetSize), 1, []), ...
+                "data_type", char(obj.Datatype.ZarrV3Type), ...
+                "chunk_grid", struct( ...
+                    "name", "regular", ...
+                    "configuration", struct("chunk_shape", reshape(double(obj.ChunkSize), 1, []))), ...
+                "chunk_key_encoding", struct( ...
+                    "name", "default", ...
+                    "configuration", struct("separator", "/")), ...
+                "fill_value", obj.FillValue, ...
+                "codecs", obj.Compression);
+
+            metadataJSON = jsonencode(metadata);
         end
 
  
