@@ -214,16 +214,38 @@ classdef tZarrWrite < SharedZarrTestSetup
         end
 
         function matlabWriteV3ReadableFromPython(testcase)
-            % Verify MATLAB-created v3 data is readable through the Python
-            % TensorStore layer.
+            % Verify MATLAB-created default v3 data is readable through
+            % the Python TensorStore layer.
+            testcase.verifyV3RoundTripReadableFromPython([]);
+        end
+
+        function matlabWriteV3ZstdReadableFromPython(testcase)
+            % Verify MATLAB-created zstd-compressed v3 data is readable
+            % through the Python TensorStore layer.
+            testcase.verifyV3RoundTripReadableFromPython(struct("id", "zstd", "level", 3));
+        end
+
+        function matlabWriteV3Crc32cReadableFromPython(testcase)
+            % Verify MATLAB-created crc32c-protected v3 data is readable
+            % through the Python TensorStore layer.
+            compression = [ ...
+                struct("name", "bytes", "configuration", struct("endian", "little")), ...
+                struct("name", "crc32c", "configuration", struct())];
+            testcase.verifyV3RoundTripReadableFromPython(compression);
+        end
+
+        function writeArrayV3PreservesDimensionNames(testcase)
+            % Verify v3 writes preserve dimension names recorded at create time.
+            dimensionNames = ["rows", "cols"];
             expData = single(reshape(1:prod(testcase.ArrSize), testcase.ArrSize));
+
             zarrcreate(testcase.ArrPathWrite, testcase.ArrSize, ...
-                Datatype='single', ZarrFormat=3);
+                Datatype='single', DimensionNames=dimensionNames, ZarrFormat=3);
             zarrwrite(testcase.ArrPathWrite, expData);
 
-            actData = testcase.readV3ArrayViaPython(testcase.ArrPathWrite);
-            testcase.verifyEqual(actData, expData, ...
-                'Failed to verify Python/TensorStore interoperability for v3 writes.');
+            actInfo = zarrinfo(testcase.ArrPathWrite);
+            testcase.verifyEqual(string(actInfo.dimension_names(:)), dimensionNames(:), ...
+                'Failed to preserve dimension names after writing a v3 array.');
         end
 
         function writeToNonExistentArray(testcase)
@@ -243,19 +265,30 @@ classdef tZarrWrite < SharedZarrTestSetup
     end
 
     methods(Access = private)
+        function verifyV3RoundTripReadableFromPython(testcase, compression)
+            expData = single(reshape(1:prod(testcase.ArrSize), testcase.ArrSize));
+            zarrcreate(testcase.ArrPathWrite, testcase.ArrSize, ...
+                Datatype='single', Compression=compression, ZarrFormat=3);
+            zarrwrite(testcase.ArrPathWrite, expData);
+
+            actData = testcase.readV3ArrayViaPython(testcase.ArrPathWrite);
+            testcase.verifyEqual(actData, expData, ...
+                'Failed to verify Python/TensorStore interoperability for v3 writes.');
+        end
+
         function data = readV3ArrayViaPython(~, filepath)
             % Read a v3 array directly through the Python TensorStore helper.
             info = zarrinfo(filepath);
             kvstore = Zarr.ZarrPy.createKVStore(false, Zarr.getFullPath(filepath));
-            metadata = struct( ...
-                "zarr_format", 3, ...
-                "node_type", "array", ...
-                "shape", reshape(double(info.shape), 1, []), ...
-                "data_type", char(string(info.data_type)), ...
-                "chunk_grid", info.chunk_grid, ...
-                "chunk_key_encoding", info.chunk_key_encoding, ...
-                "codecs", info.codecs, ...
-                "fill_value", info.fill_value);
+            metadata = struct();
+            metadata.zarr_format = 3;
+            metadata.node_type = "array";
+            metadata.shape = reshape(double(info.shape), 1, []);
+            metadata.data_type = char(string(info.data_type));
+            metadata.chunk_grid = info.chunk_grid;
+            metadata.chunk_key_encoding = info.chunk_key_encoding;
+            metadata.codecs = info.codecs;
+            metadata.fill_value = info.fill_value;
             metadataJSON = jsonencode(metadata);
 
             shape = reshape(double(info.shape), 1, []);

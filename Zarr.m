@@ -375,10 +375,13 @@ classdef Zarr < handle
             data = cast(ndArrayData, obj.Datatype.MATLABType);
         end
 
-        function create(obj, dtype, data_size, chunk_size, fillvalue, compression, zarrFormat)
+        function create(obj, dtype, data_size, chunk_size, fillvalue, compression, zarrFormat, dimensionNames)
             % Function to create the Zarr array
             if nargin < 7
                 zarrFormat = 2;
+            end
+            if nargin < 8
+                dimensionNames = strings(1, 0);
             end
 
             obj.DsetSize = int64(data_size);
@@ -421,7 +424,7 @@ classdef Zarr < handle
                 end
 
                 obj.Compression = obj.parseV3Compression(compression);
-                metadataJSON = obj.buildV3MetadataJSON();
+                metadataJSON = obj.buildV3MetadataJSON(dimensionNames);
                 obj.TensorstoreSchema = Zarr.ZarrPy.createZarr3(obj.KVStoreSchema, metadataJSON);
             end
 
@@ -510,15 +513,15 @@ classdef Zarr < handle
             end
 
             driver = "zarr3";
-            metadata = struct( ...
-                "zarr_format", 3, ...
-                "node_type", "array", ...
-                "shape", reshape(info.shape, 1, []), ...
-                "data_type", char(string(info.data_type)), ...
-                "chunk_grid", info.chunk_grid, ...
-                "chunk_key_encoding", info.chunk_key_encoding, ...
-                "codecs", info.codecs, ...
-                "fill_value", info.fill_value);
+            metadata = struct();
+            metadata.zarr_format = 3;
+            metadata.node_type = "array";
+            metadata.shape = reshape(info.shape, 1, []);
+            metadata.data_type = char(string(info.data_type));
+            metadata.chunk_grid = info.chunk_grid;
+            metadata.chunk_key_encoding = info.chunk_key_encoding;
+            metadata.codecs = info.codecs;
+            metadata.fill_value = info.fill_value;
 
             if isfield(info, 'attributes') && ~isempty(info.attributes)
                 metadata.attributes = info.attributes;
@@ -641,7 +644,7 @@ classdef Zarr < handle
 
             if ~(isstruct(compression) && all(isfield(compression, 'name')))
                 error("MATLAB:Zarr:unsupportedV3CodecChain", ...
-                    "Supported Zarr v3 codecs are limited to a bytes + gzip chain.");
+                    "Supported Zarr v3 codec chains use a little-endian bytes codec followed by gzip, zstd, or crc32c.");
             end
 
             codecs = obj.validateV3CodecChain(compression);
@@ -649,9 +652,15 @@ classdef Zarr < handle
 
         function codecs = mapLegacyCompressionToV3Codecs(~, compression)
             % Support a small v3-compatible subset of the legacy Compression syntax.
-            if ~isfield(compression, 'id') || string(compression.id) ~= "gzip"
+            if ~isfield(compression, 'id')
                 error("MATLAB:Zarr:unsupportedV3CodecChain", ...
-                    "Supported Zarr v3 codecs are limited to a bytes + gzip chain.");
+                    "Supported Zarr v3 codec chains use a little-endian bytes codec followed by gzip, zstd, or crc32c.");
+            end
+
+            codecName = string(compression.id);
+            if ~any(codecName == ["gzip", "zstd"])
+                error("MATLAB:Zarr:unsupportedV3CodecChain", ...
+                    "Legacy v3 Compression syntax supports only gzip or zstd.");
             end
 
             level = 1;
@@ -661,42 +670,20 @@ classdef Zarr < handle
 
             codecs = [ ...
                 struct("name", "bytes", "configuration", struct("endian", "little")), ...
-                struct("name", "gzip", "configuration", struct("level", level))];
+                struct("name", char(codecName), "configuration", struct("level", level))];
         end
 
         function codecs = validateV3CodecChain(~, codecs)
             % Normalize and validate the supported v3 codec chain.
             if numel(codecs) ~= 2
                 error("MATLAB:Zarr:unsupportedV3CodecChain", ...
-                    "Supported Zarr v3 codecs are limited to a bytes + gzip chain.");
+                    "Supported Zarr v3 codec chains must contain exactly two codecs.");
             end
 
-            bytesCodec = codecs(1);
-            gzipCodec = codecs(2);
+            bytesCodec = Zarr.validateV3BytesCodec(codecs(1));
+            dataCodec = Zarr.validateV3PayloadCodec(codecs(2));
 
-            if string(bytesCodec.name) ~= "bytes"
-                error("MATLAB:Zarr:unsupportedV3CodecChain", ...
-                    "The first Zarr v3 codec must be the bytes codec.");
-            end
-
-            if ~isfield(bytesCodec, 'configuration') || ~isfield(bytesCodec.configuration, 'endian')
-                bytesCodec.configuration = struct("endian", "little");
-            end
-            if string(bytesCodec.configuration.endian) ~= "little"
-                error("MATLAB:Zarr:unsupportedV3CodecChain", ...
-                    "Only little-endian Zarr v3 bytes codecs are supported.");
-            end
-
-            if string(gzipCodec.name) ~= "gzip"
-                error("MATLAB:Zarr:unsupportedV3CodecChain", ...
-                    "The second Zarr v3 codec must be the gzip codec.");
-            end
-
-            if ~isfield(gzipCodec, 'configuration') || ~isfield(gzipCodec.configuration, 'level')
-                gzipCodec.configuration = struct("level", 1);
-            end
-
-            codecs = [bytesCodec, gzipCodec];
+            codecs = [bytesCodec, dataCodec];
         end
 
         function codecs = getDefaultV3Codecs(~)
@@ -706,26 +693,91 @@ classdef Zarr < handle
                 struct("name", "gzip", "configuration", struct("level", 1))];
         end
 
-        function metadataJSON = buildV3MetadataJSON(obj)
+        function metadataJSON = buildV3MetadataJSON(obj, dimensionNames)
             % Build a TensorStore-compatible metadata document for Zarr v3 creation.
-            metadata = struct( ...
-                "zarr_format", 3, ...
-                "node_type", "array", ...
-                "shape", reshape(double(obj.DsetSize), 1, []), ...
-                "data_type", char(obj.Datatype.ZarrV3Type), ...
-                "chunk_grid", struct( ...
-                    "name", "regular", ...
-                    "configuration", struct("chunk_shape", reshape(double(obj.ChunkSize), 1, []))), ...
-                "chunk_key_encoding", struct( ...
-                    "name", "default", ...
-                    "configuration", struct("separator", "/")), ...
-                "fill_value", obj.FillValue, ...
-                "codecs", obj.Compression);
+            if nargin < 2
+                dimensionNames = strings(1, 0);
+            end
+
+            metadata = struct();
+            metadata.zarr_format = 3;
+            metadata.node_type = "array";
+            metadata.shape = reshape(double(obj.DsetSize), 1, []);
+            metadata.data_type = char(obj.Datatype.ZarrV3Type);
+            metadata.chunk_grid = struct( ...
+                "name", "regular", ...
+                "configuration", struct("chunk_shape", reshape(double(obj.ChunkSize), 1, [])));
+            metadata.chunk_key_encoding = struct( ...
+                "name", "default", ...
+                "configuration", struct("separator", "/"));
+            metadata.fill_value = obj.FillValue;
+            metadata.codecs = obj.Compression;
+
+            if ~isempty(dimensionNames)
+                metadata.dimension_names = cellstr(reshape(string(dimensionNames), 1, []));
+            end
 
             metadataJSON = jsonencode(metadata);
         end
 
  
+    end
+
+    methods(Static, Access = private)
+        function codec = validateV3BytesCodec(codec)
+            if string(codec.name) ~= "bytes"
+                error("MATLAB:Zarr:unsupportedV3CodecChain", ...
+                    "The first Zarr v3 codec must be the bytes codec.");
+            end
+
+            if ~isfield(codec, 'configuration') || ~isfield(codec.configuration, 'endian')
+                codec.configuration = struct("endian", "little");
+            end
+
+            if string(codec.configuration.endian) ~= "little"
+                error("MATLAB:Zarr:unsupportedV3CodecChain", ...
+                    "Only little-endian Zarr v3 bytes codecs are supported.");
+            end
+        end
+
+        function codec = validateV3PayloadCodec(codec)
+            codecName = string(codec.name);
+
+            switch codecName
+                case {"gzip", "zstd"}
+                    if ~isfield(codec, 'configuration') || ~isfield(codec.configuration, 'level')
+                        codec.configuration = struct("level", 1);
+                    end
+                    level = codec.configuration.level;
+                    if ~(isscalar(level) && isnumeric(level) && isfinite(level) && level == fix(level))
+                        error("MATLAB:Zarr:unsupportedV3CodecChain", ...
+                            "The %s codec level must be a finite integer scalar.", codecName);
+                    end
+
+                    if codecName == "gzip" && (level < 0 || level > 9)
+                        error("MATLAB:Zarr:unsupportedV3CodecChain", ...
+                            "The gzip codec level must be in the range [0, 9].");
+                    end
+
+                    if codecName == "zstd" && (level < -131072 || level > 22)
+                        error("MATLAB:Zarr:unsupportedV3CodecChain", ...
+                            "The zstd codec level must be in the range [-131072, 22].");
+                    end
+
+                case "crc32c"
+                    if isfield(codec, 'configuration') && ~isempty(fieldnames(codec.configuration))
+                        error("MATLAB:Zarr:unsupportedV3CodecChain", ...
+                            "The crc32c codec does not accept configuration parameters.");
+                    end
+                    if ~isfield(codec, 'configuration')
+                        codec.configuration = struct();
+                    end
+
+                otherwise
+                    error("MATLAB:Zarr:unsupportedV3CodecChain", ...
+                        "Supported Zarr v3 payload codecs are gzip, zstd, and crc32c.");
+            end
+        end
     end
 
 end

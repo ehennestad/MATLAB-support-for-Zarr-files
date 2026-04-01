@@ -76,6 +76,11 @@ function zarrcreate(filepath, datasize, options)
 %                                               compression, specified as a
 %                                               nonnegative integer or inf.
 %                                               The default value is 0.
+%
+%     DimensionNames          - Names for each array dimension, specified
+%                               as a string array, cell array of character
+%                               vectors, or character vector. Supported
+%                               only for Zarr v3 arrays.
 
 %   Copyright 2025 The MathWorks, Inc.
 
@@ -86,6 +91,7 @@ arguments
     options.Datatype {mustBeTextScalar, mustBeNonempty} = 'double'
     options.FillValue {mustBeNumericOrLogical} = []
     options.Compression {mustBeStructOrEmpty} = []
+    options.DimensionNames = []
     options.ZarrFormat (1,1) double {mustBeMember(options.ZarrFormat, [2 3])} = 2
 end
 
@@ -104,9 +110,11 @@ if isscalar(datasize)
     options.ChunkSize = [1 options.ChunkSize];
 end
 
+dimensionNames = normalizeDimensionNames(options.DimensionNames, numel(datasize), options.ZarrFormat);
+
 zarrObj = Zarr(filepath);
 zarrObj.create(options.Datatype, datasize, options.ChunkSize, ...
-    options.FillValue, options.Compression, options.ZarrFormat)
+    options.FillValue, options.Compression, options.ZarrFormat, dimensionNames)
 
 end
 
@@ -115,5 +123,45 @@ function mustBeStructOrEmpty(compression)
 if ~(isstruct(compression) || isempty(compression))
     error("MATLAB:zarrcreate:invalidCompression",...
         "Invalid data type. Specify Compression as a structure.");
+end
+end
+
+function dimensionNames = normalizeDimensionNames(dimensionNames, numDims, zarrFormat)
+if isempty(dimensionNames)
+    dimensionNames = strings(1, 0);
+    return
+end
+
+if zarrFormat ~= 3
+    error("MATLAB:zarrcreate:dimensionNamesRequireV3", ...
+        "DimensionNames are supported only for Zarr v3 arrays.");
+end
+
+if ischar(dimensionNames)
+    dimensionNames = string({dimensionNames});
+elseif iscellstr(dimensionNames)
+    dimensionNames = string(dimensionNames);
+elseif isstring(dimensionNames)
+    % already normalized below
+else
+    error("MATLAB:zarrcreate:invalidDimensionNamesType", ...
+        "DimensionNames must be a string array, character vector, or cell array of character vectors.");
+end
+
+dimensionNames = reshape(string(dimensionNames), 1, []);
+
+if any(strlength(dimensionNames) == 0)
+    error("MATLAB:zarrcreate:emptyDimensionName", ...
+        "DimensionNames must contain non-empty text values.");
+end
+
+if numel(dimensionNames) ~= numDims
+    error("MATLAB:zarrcreate:dimensionNamesMismatch", ...
+        "DimensionNames must contain one name for each Zarr array dimension.");
+end
+
+if numel(unique(dimensionNames)) ~= numel(dimensionNames)
+    error("MATLAB:zarrcreate:duplicateDimensionNames", ...
+        "DimensionNames must be unique.");
 end
 end

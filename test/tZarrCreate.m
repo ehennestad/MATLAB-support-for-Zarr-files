@@ -113,6 +113,43 @@ classdef tZarrCreate < SharedZarrTestSetup
             testcase.verifyEqual(actInfo.codecs(2).configuration.level, 5);
         end
 
+        function createArrayV3ZstdCompression(testcase)
+            % Verify v3 creation supports the tested bytes + zstd codec chain.
+            compression.id = 'zstd';
+            compression.level = 3;
+
+            zarrcreate(testcase.ArrPathWrite, testcase.ArrSize, ...
+                Compression=compression, ZarrFormat=3);
+
+            actInfo = zarrinfo(testcase.ArrPathWrite);
+            testcase.verifyEqual({actInfo.codecs.name}, {'bytes', 'zstd'});
+            testcase.verifyEqual(actInfo.codecs(2).configuration.level, 3);
+        end
+
+        function createArrayV3Crc32cCompression(testcase)
+            % Verify v3 creation supports the tested bytes + crc32c codec chain.
+            codecs = [ ...
+                struct("name", "bytes", "configuration", struct("endian", "little")), ...
+                struct("name", "crc32c", "configuration", struct())];
+
+            zarrcreate(testcase.ArrPathWrite, testcase.ArrSize, ...
+                Compression=codecs, ZarrFormat=3);
+
+            actInfo = zarrinfo(testcase.ArrPathWrite);
+            testcase.verifyEqual({actInfo.codecs.name}, {'bytes', 'crc32c'});
+        end
+
+        function createArrayV3DimensionNames(testcase)
+            % Verify v3 creation records dimension names in metadata.
+            dimensionNames = ["rows", "cols"];
+
+            zarrcreate(testcase.ArrPathWrite, testcase.ArrSize, ...
+                DimensionNames=dimensionNames, ZarrFormat=3);
+
+            actInfo = zarrinfo(testcase.ArrPathWrite);
+            testcase.verifyEqual(string(actInfo.dimension_names(:)), dimensionNames(:));
+        end
+
         function invalidFilePath(testcase)
             % Verify error when an invalid file path is used as an input to
             % zarrcreate function.
@@ -275,11 +312,44 @@ classdef tZarrCreate < SharedZarrTestSetup
             % Verify unsupported v3 codec chains are rejected early.
             codecs = [ ...
                 struct("name", "bytes", "configuration", struct("endian", "little")), ...
-                struct("name", "zstd", "configuration", struct("level", 1))];
+                struct("name", "transpose", "configuration", struct())];
 
             testcase.verifyError(@() zarrcreate(testcase.ArrPathWrite, testcase.ArrSize, ...
                 Compression=codecs, ZarrFormat=3), ...
                 'MATLAB:Zarr:unsupportedV3CodecChain');
+        end
+
+        function invalidV3CodecParameters(testcase)
+            % Verify unsupported v3 codec parameter combinations are rejected.
+            testcase.verifyError(@() zarrcreate(testcase.ArrPathWrite, testcase.ArrSize, ...
+                Compression=struct("id", "zstd", "level", 23), ZarrFormat=3), ...
+                'MATLAB:Zarr:unsupportedV3CodecChain');
+
+            codecs = [ ...
+                struct("name", "bytes", "configuration", struct("endian", "little")), ...
+                struct("name", "crc32c", "configuration", struct("level", 1))];
+            testcase.verifyError(@() zarrcreate(testcase.ArrPathWrite, testcase.ArrSize, ...
+                Compression=codecs, ZarrFormat=3), ...
+                'MATLAB:Zarr:unsupportedV3CodecChain');
+        end
+
+        function invalidDimensionNames(testcase)
+            % Verify invalid v3 dimension-name configurations are rejected.
+            testcase.verifyError(@() zarrcreate(testcase.ArrPathWrite, testcase.ArrSize, ...
+                DimensionNames=["rows"], ZarrFormat=3), ...
+                'MATLAB:zarrcreate:dimensionNamesMismatch');
+
+            testcase.verifyError(@() zarrcreate(testcase.ArrPathWrite, testcase.ArrSize, ...
+                DimensionNames=["rows", ""], ZarrFormat=3), ...
+                'MATLAB:zarrcreate:emptyDimensionName');
+
+            testcase.verifyError(@() zarrcreate(testcase.ArrPathWrite, testcase.ArrSize, ...
+                DimensionNames=["axis", "axis"], ZarrFormat=3), ...
+                'MATLAB:zarrcreate:duplicateDimensionNames');
+
+            testcase.verifyError(@() zarrcreate(testcase.ArrPathWrite, testcase.ArrSize, ...
+                DimensionNames=["rows", "cols"]), ...
+                'MATLAB:zarrcreate:dimensionNamesRequireV3');
         end
 
         function specialFillValue(testcase)

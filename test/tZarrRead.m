@@ -16,6 +16,8 @@ classdef tZarrRead < matlab.unittest.TestCase
     properties
         ArrPathReadV3
         ArrPathReadV3Fill
+        ArrPathReadV3Zstd
+        ArrPathReadV3Crc32c
     end
 
     methods(TestClassSetup)
@@ -33,6 +35,8 @@ classdef tZarrRead < matlab.unittest.TestCase
 
             testcase.ArrPathReadV3 = fullfile(runtimeRoot, "arr_v3");
             testcase.ArrPathReadV3Fill = fullfile(runtimeRoot, "arr_v3_fill");
+            testcase.ArrPathReadV3Zstd = fullfile(runtimeRoot, "arr_v3_zstd");
+            testcase.ArrPathReadV3Crc32c = fullfile(runtimeRoot, "arr_v3_crc32c");
             testcase.createV3ReadFixtures();
         end
     end
@@ -160,6 +164,22 @@ classdef tZarrRead < matlab.unittest.TestCase
                 'Failed to verify dimension names in the v3 read fixture.');
         end
 
+        function verifyArrReadV3Zstd(testcase)
+            % Verify MATLAB can read a Python-created v3 array using zstd.
+            expData = testcase.getExpectedV3Data();
+            actData = zarrread(testcase.ArrPathReadV3Zstd);
+            testcase.verifyEqual(actData, expData, ...
+                'Failed to verify read from a zstd-compressed v3 array.');
+        end
+
+        function verifyArrReadV3Crc32c(testcase)
+            % Verify MATLAB can read a Python-created v3 array using crc32c.
+            expData = testcase.getExpectedV3Data();
+            actData = zarrread(testcase.ArrPathReadV3Crc32c);
+            testcase.verifyEqual(actData, expData, ...
+                'Failed to verify read from a crc32c-protected v3 array.');
+        end
+
         function verifyGroupInpError(testcase)
             % Verify error if a user tries to pass the group as input to
             % zarrread function.
@@ -260,7 +280,24 @@ classdef tZarrRead < matlab.unittest.TestCase
                 data, ...
                 [2 3], ...
                 single(-9), ...
-                ["rows", "cols"]);
+                ["rows", "cols"], ...
+                tZarrRead.getDefaultV3Codecs());
+
+            testcase.createDenseV3Array( ...
+                testcase.ArrPathReadV3Zstd, ...
+                data, ...
+                [2 3], ...
+                single(-9), ...
+                [], ...
+                tZarrRead.getZstdV3Codecs());
+
+            testcase.createDenseV3Array( ...
+                testcase.ArrPathReadV3Crc32c, ...
+                data, ...
+                [2 3], ...
+                single(-9), ...
+                [], ...
+                tZarrRead.getCrc32cV3Codecs());
 
             testcase.createSparseV3Array( ...
                 testcase.ArrPathReadV3Fill, ...
@@ -269,10 +306,10 @@ classdef tZarrRead < matlab.unittest.TestCase
                 fillValue);
         end
 
-        function createDenseV3Array(~, path, data, chunkShape, fillValue, dimensionNames)
+        function createDenseV3Array(~, path, data, chunkShape, fillValue, dimensionNames, codecs)
             kvstore = Zarr.ZarrPy.createKVStore(false, Zarr.getFullPath(path));
             metadataJSON = tZarrRead.createV3MetadataJSON( ...
-                size(data), "float32", chunkShape, fillValue, dimensionNames);
+                size(data), "float32", chunkShape, fillValue, dimensionNames, codecs);
 
             Zarr.ZarrPy.createZarr3(kvstore, metadataJSON);
             Zarr.ZarrPy.writeZarr(kvstore, data, "zarr3", metadataJSON);
@@ -281,7 +318,7 @@ classdef tZarrRead < matlab.unittest.TestCase
         function createSparseV3Array(~, path, dataShape, chunkShape, fillValue)
             kvstore = Zarr.ZarrPy.createKVStore(false, Zarr.getFullPath(path));
             metadataJSON = tZarrRead.createV3MetadataJSON( ...
-                dataShape, "float32", chunkShape, fillValue, []);
+                dataShape, "float32", chunkShape, fillValue, [], tZarrRead.getDefaultV3Codecs());
 
             topLeftChunk = single(reshape(1:9, 3, 3));
             bottomRightChunk = single(reshape(10:18, 3, 3));
@@ -303,11 +340,7 @@ classdef tZarrRead < matlab.unittest.TestCase
     end
 
     methods(Static, Access = private)
-        function metadataJSON = createV3MetadataJSON(dataShape, dataType, chunkShape, fillValue, dimensionNames)
-            codecs = [ ...
-                struct("name", "bytes", "configuration", struct("endian", "little")), ...
-                struct("name", "gzip", "configuration", struct("level", 1))];
-
+        function metadataJSON = createV3MetadataJSON(dataShape, dataType, chunkShape, fillValue, dimensionNames, codecs)
             metadata = struct( ...
                 "zarr_format", 3, ...
                 "node_type", "array", ...
@@ -327,6 +360,24 @@ classdef tZarrRead < matlab.unittest.TestCase
             end
 
             metadataJSON = jsonencode(metadata);
+        end
+
+        function codecs = getDefaultV3Codecs()
+            codecs = [ ...
+                struct("name", "bytes", "configuration", struct("endian", "little")), ...
+                struct("name", "gzip", "configuration", struct("level", 1))];
+        end
+
+        function codecs = getZstdV3Codecs()
+            codecs = [ ...
+                struct("name", "bytes", "configuration", struct("endian", "little")), ...
+                struct("name", "zstd", "configuration", struct("level", 3))];
+        end
+
+        function codecs = getCrc32cV3Codecs()
+            codecs = [ ...
+                struct("name", "bytes", "configuration", struct("endian", "little")), ...
+                struct("name", "crc32c", "configuration", struct())];
         end
     end
 end

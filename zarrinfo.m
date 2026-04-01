@@ -83,6 +83,41 @@ if strcmp(infoStruct.node_type, 'array')
 
     if ~isfield(infoStruct, 'codecs')
         infoStruct.codecs = [];
+    else
+        infoStruct.codecs = normalizeV3Codecs(infoStruct.codecs);
     end
 end
+end
+
+function codecs = normalizeV3Codecs(codecs)
+if isempty(codecs)
+    return
+end
+
+if isstruct(codecs)
+    for idx = 1:numel(codecs)
+        if ~isfield(codecs(idx), 'configuration')
+            codecs(idx).configuration = struct();
+        end
+    end
+    return
+end
+
+if iscell(codecs)
+    codecStructs = repmat(struct("name", "", "configuration", struct()), 1, numel(codecs));
+    for idx = 1:numel(codecs)
+        codec = codecs{idx};
+        codecStructs(idx).name = char(string(codec.name));
+        if isfield(codec, 'configuration')
+            codecStructs(idx).configuration = codec.configuration;
+        else
+            codecStructs(idx).configuration = struct();
+        end
+    end
+    codecs = codecStructs;
+    return
+end
+
+error("MATLAB:zarrinfo:invalidV3Codecs", ...
+    "Invalid v3 codec metadata encountered.");
 end
