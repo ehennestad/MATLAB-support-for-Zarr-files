@@ -85,11 +85,46 @@ classdef tZarrAttributes < SharedZarrTestSetup
             testcase.verifyEqual(actAttr2,expAttr2,'Failed to verify numeric attribute.');
         end
 
-        function verifyZarrV3WriteError(testcase)
-            % Verify error when a user tries to write attribute to zarr v3 file.
-            filePath = 'grp_v3/arr_v3';
-            errID = 'MATLAB:zarrwriteatt:writeAttV3';
-            testcase.verifyError(@()zarrwriteatt(filePath,'myAttr','attrVal'),errID);
+        function verifyZarrV3ArrayAttributes(testcase)
+            % Verify writing inline attributes for a Zarr v3 array.
+            import matlab.unittest.fixtures.WorkingFolderFixture
+            testcase.applyFixture(WorkingFolderFixture);
+
+            zarrcreate('grp_v3/arr_v3', [4 6], DimensionNames=["rows", "cols"], ZarrFormat=3);
+            zarrwriteatt('grp_v3/arr_v3', 'description', 'This is a v3 array');
+            zarrwriteatt('grp_v3/arr_v3', 'numericVector', [1 2 3]);
+
+            info = zarrinfo('grp_v3/arr_v3');
+            testcase.verifyEqual(info.attributes.description, 'This is a v3 array');
+            testcase.verifyEqual(info.attributes.numericVector, [1; 2; 3]);
+            testcase.verifyEqual(string(info.dimension_names(:)), ["rows"; "cols"]);
+        end
+
+        function verifyZarrV3GroupAttributes(testcase)
+            % Verify writing inline attributes for a Zarr v3 group.
+            import matlab.unittest.fixtures.WorkingFolderFixture
+            testcase.applyFixture(WorkingFolderFixture);
+
+            zarrgroupcreate('grp_v3', ZarrFormat=3);
+            zarrwriteatt('grp_v3', 'grp_description', 'This is a v3 group');
+
+            info = zarrinfo('grp_v3');
+            testcase.verifyEqual(info.attributes.grp_description, 'This is a v3 group');
+        end
+
+        function verifyZarrV3AttributeOverwrite(testcase)
+            % Verify overwriting an existing inline v3 attribute.
+            import matlab.unittest.fixtures.WorkingFolderFixture
+            testcase.applyFixture(WorkingFolderFixture);
+
+            zarrcreate('grp_v3/arr_v3', [4 6], ZarrFormat=3);
+            zarrwriteatt('grp_v3/arr_v3', 'status', 'draft');
+            zarrwriteatt('grp_v3/arr_v3', 'status', 'final');
+            zarrwriteatt('grp_v3/arr_v3', 'version', 3);
+
+            info = zarrinfo('grp_v3/arr_v3');
+            testcase.verifyEqual(info.attributes.status, 'final');
+            testcase.verifyEqual(info.attributes.version, 3);
         end
 
         function nonExistentFile(testcase)

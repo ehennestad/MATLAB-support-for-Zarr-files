@@ -20,6 +20,11 @@ classdef tZarrRead < matlab.unittest.TestCase
         ArrPathReadV3Crc32c
     end
 
+    properties(TestParameter)
+        V3DataType = {'logical','int8','uint8','int16','uint16', ...
+            'int32','uint32','int64','uint64','single','double'}
+    end
+
     methods(TestClassSetup)
         function addSrcCodePath(testcase)
             % Add source code path before running the tests
@@ -180,6 +185,29 @@ classdef tZarrRead < matlab.unittest.TestCase
                 'Failed to verify read from a crc32c-protected v3 array.');
         end
 
+        function verifyArrReadV3SupportedDtypes(testcase, V3DataType)
+            % Verify MATLAB can read Python-created v3 arrays for each supported dtype.
+            runtimeRoot = string(tempname);
+            mkdir(runtimeRoot);
+            testcase.addTeardown(@()rmdir(runtimeRoot, 's'));
+
+            zpath = fullfile(runtimeRoot, "arr_v3_" + V3DataType);
+            expData = testcase.getExpectedTypedV3Data(V3DataType, [4 6]);
+            fillValue = testcase.getTypedV3FillValue(V3DataType);
+
+            testcase.createDenseV3Array( ...
+                zpath, ...
+                expData, ...
+                [2 3], ...
+                fillValue, ...
+                [], ...
+                tZarrRead.getDefaultV3Codecs());
+
+            actData = zarrread(zpath);
+            testcase.verifyEqual(actData, expData, ...
+                "Failed to verify v3 read for data type " + string(V3DataType) + ".");
+        end
+
         function verifyGroupInpError(testcase)
             % Verify error if a user tries to pass the group as input to
             % zarrread function.
@@ -308,8 +336,9 @@ classdef tZarrRead < matlab.unittest.TestCase
 
         function createDenseV3Array(~, path, data, chunkShape, fillValue, dimensionNames, codecs)
             kvstore = Zarr.ZarrPy.createKVStore(false, Zarr.getFullPath(path));
+            dataType = char(ZarrDatatype.fromMATLABType(string(class(data))).ZarrV3Type);
             metadataJSON = tZarrRead.createV3MetadataJSON( ...
-                size(data), "float32", chunkShape, fillValue, dimensionNames, codecs);
+                size(data), dataType, chunkShape, fillValue, dimensionNames, codecs);
 
             Zarr.ZarrPy.createZarr3(kvstore, metadataJSON);
             Zarr.ZarrPy.writeZarr(kvstore, data, "zarr3", metadataJSON);
@@ -337,6 +366,39 @@ classdef tZarrRead < matlab.unittest.TestCase
             data(1:3, 1:3) = single(reshape(1:9, 3, 3));
             data(4:6, 4:6) = single(reshape(10:18, 3, 3));
         end
+
+        function data = getExpectedTypedV3Data(~, dtype, dataShape)
+            dtype = string(dtype);
+            numElements = prod(dataShape);
+            baseData = reshape(0:numElements-1, dataShape);
+
+            switch dtype
+                case "logical"
+                    data = logical(mod(baseData, 2));
+                case {'int8', 'int16', 'int32', 'int64'}
+                    data = cast(baseData - floor(numElements / 2), dtype);
+                case {'uint8', 'uint16', 'uint32', 'uint64'}
+                    data = cast(baseData, dtype);
+                case {'single', 'double'}
+                    data = cast(baseData + 0.5, dtype);
+                otherwise
+                    error("MATLAB:tZarrRead:unsupportedTestType", ...
+                        "Unsupported v3 test data type ""%s"".", dtype);
+            end
+        end
+
+        function fillValue = getTypedV3FillValue(~, dtype)
+            dtype = string(dtype);
+            switch dtype
+                case "logical"
+                    fillValue = false;
+                case {'int8', 'uint8', 'int16', 'uint16', 'int32', 'uint32', 'int64', 'uint64', 'single', 'double'}
+                    fillValue = cast(0, dtype);
+                otherwise
+                    error("MATLAB:tZarrRead:unsupportedTestType", ...
+                        "Unsupported v3 test data type ""%s"".", dtype);
+            end
+        end
     end
 
     methods(Static, Access = private)
@@ -352,7 +414,7 @@ classdef tZarrRead < matlab.unittest.TestCase
                 "chunk_key_encoding", struct( ...
                     "name", "default", ...
                     "configuration", struct("separator", "/")), ...
-                "fill_value", double(fillValue), ...
+                "fill_value", fillValue, ...
                 "codecs", codecs);
 
             if ~isempty(dimensionNames)

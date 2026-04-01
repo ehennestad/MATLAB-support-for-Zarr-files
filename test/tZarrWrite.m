@@ -219,6 +219,18 @@ classdef tZarrWrite < SharedZarrTestSetup
             testcase.verifyV3RoundTripReadableFromPython([]);
         end
 
+        function matlabWriteV3ReadableFromPythonSupportedDtypes(testcase, DataType)
+            % Verify MATLAB-created v3 arrays for each supported dtype are readable through Python.
+            expData = testcase.getExpectedTypedV3Data(DataType, testcase.ArrSize);
+            zarrcreate(testcase.ArrPathWrite, testcase.ArrSize, ...
+                Datatype=DataType, ZarrFormat=3);
+            zarrwrite(testcase.ArrPathWrite, expData);
+
+            actData = testcase.readV3ArrayViaPython(testcase.ArrPathWrite);
+            testcase.verifyEqual(actData, expData, ...
+                "Failed to verify Python/TensorStore interoperability for v3 dtype " + string(DataType) + ".");
+        end
+
         function matlabWriteV3ZstdReadableFromPython(testcase)
             % Verify MATLAB-created zstd-compressed v3 data is readable
             % through the Python TensorStore layer.
@@ -295,6 +307,26 @@ classdef tZarrWrite < SharedZarrTestSetup
             pyData = Zarr.ZarrPy.readZarr(kvstore, int64(zeros(size(shape))), ...
                 int64(shape), int64(ones(size(shape))), "zarr3", metadataJSON);
             data = cast(pyData, char(ZarrDatatype.fromV3Type(string(info.data_type)).MATLABType));
+        end
+
+        function data = getExpectedTypedV3Data(~, dtype, dataShape)
+            dtype = string(dtype);
+            numElements = prod(dataShape);
+            baseData = reshape(0:numElements-1, dataShape);
+
+            switch dtype
+                case "logical"
+                    data = logical(mod(baseData, 2));
+                case {'int8', 'int16', 'int32', 'int64'}
+                    data = cast(baseData - floor(numElements / 2), dtype);
+                case {'uint8', 'uint16', 'uint32', 'uint64'}
+                    data = cast(baseData, dtype);
+                case {'single', 'double'}
+                    data = cast(baseData + 0.5, dtype);
+                otherwise
+                    error("MATLAB:tZarrWrite:unsupportedTestType", ...
+                        "Unsupported v3 test data type ""%s"".", dtype);
+            end
         end
     end
 end

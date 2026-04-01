@@ -104,5 +104,6 @@ If you specify the `FILEPATH` as a group (intermediate directory) with no `.zgro
 
 ## `zarrwriteatt(FILEPATH,ATTNAME,ATTVALUE)`
 Write the attribute named `ATTNAME` with the value `ATTVALUE` to the Zarr array or group located at `FILEPATH`. 
-The attribute is written only if a .zarray or .zgroup file exists at the location specified by `FILEPATH`.
+For Zarr v2, attributes are written to `.zattrs`. For Zarr v3, attributes are written inline to `zarr.json`.
+The attribute is written only if valid Zarr metadata exists at the location specified by `FILEPATH`.
 Otherwise, the function issues an error.
