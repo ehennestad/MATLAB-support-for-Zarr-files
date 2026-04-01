@@ -16,12 +16,12 @@ childNames = sort(store.listChildren(""));
 listing = struct('name', {}, 'node_type', {}, 'zarr_format', {});
 
 for i = 1:numel(childNames)
-    childPath = fullfile(filepath, childNames(i));
-    if ~isfolder(childPath)
+    if ~store.isDirectory(childNames(i))
         continue
     end
 
     try
+        childPath = store.resolve(childNames(i));
         childMetadata = locateZarrMetadata(childPath);
     catch err
         if strcmp(err.identifier, 'MATLAB:zarrinfo:invalidZarrObject')

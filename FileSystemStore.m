@@ -10,9 +10,17 @@ classdef FileSystemStore < ZarrStore
             obj.RootPath = string(rootPath);
         end
 
+        function location = resolve(obj, key)
+            location = obj.resolveKey(key);
+        end
+
         function tf = exists(obj, key)
             path = obj.resolveKey(key);
             tf = isfile(path) || isfolder(path);
+        end
+
+        function tf = isDirectory(obj, key)
+            tf = isfolder(obj.resolveKey(key));
         end
 
         function text = readText(obj, key)

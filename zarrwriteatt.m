@@ -15,20 +15,26 @@ arguments
     attvalue
 end
 
-if isfile(fullfile(filepath,'zarr.json'))
+store = getZarrStore(filepath);
+
+try
+    metadata = locateZarrMetadata(filepath);
+catch err
+    if strcmp(err.identifier, 'MATLAB:zarrinfo:invalidZarrObject')
+        error("MATLAB:zarrwriteatt:invalidZarrObject", ...
+            "Invalid file path. File path must refer to a valid Zarr array or group.");
+    end
+    rethrow(err)
+end
+
+if metadata.zarr_format == 3
     error("MATLAB:zarrwriteatt:writeAttV3",...
         "Writing attributes to Zarr v3 files is not supported.");
 end
 
-if (~isfile(fullfile(filepath,'.zgroup')) && ~isfile(fullfile(filepath,'.zarray')))
-    error("MATLAB:zarrwriteatt:invalidZarrObject",...
-        "Invalid file path. File path must refer to a valid Zarr array or group.");
-end
-
-attrsJSONFile = fullfile(filepath, '.zattrs');
 % If .zattrs file exists already, append to it. If not, create the file and
 % write to it.
-if isfile(attrsJSONFile)
+if store.exists('.zattrs')
     userDefinedInfoStruct = readZattrs(filepath);
 else
     userDefinedInfoStruct = struct();
@@ -39,12 +45,14 @@ userDefinedInfoStruct.(attname) = attvalue;
 updatedJsonStr = jsonencode(userDefinedInfoStruct);
 
 % Write the updated JSON data back to the file
-fid = fopen(attrsJSONFile, 'w');
-if fid == -1
-    error("MATLAB:zarrwriteatt:fileOpenFailure",...
-        "Could not open file ""%s"" for writing.",filepath);
+try
+    store.writeText('.zattrs', updatedJsonStr);
+catch err
+    if strcmp(err.identifier, 'MATLAB:FileSystemStore:fileOpenFailure')
+        error("MATLAB:zarrwriteatt:fileOpenFailure",...
+            "Could not open file ""%s"" for writing.", filepath);
+    end
+    rethrow(err)
 end
-fwrite(fid, updatedJsonStr, 'char');
-fclose(fid);
 
 end
