@@ -28,7 +28,7 @@ classdef tZarrStore < matlab.unittest.TestCase
             testcase.verifyEqual(sort(store.listChildren("grp")), [".zgroup", "data.bin"]);
         end
 
-        function remotePrototypeResolvesChildLocations(testcase)
+        function remoteStoreResolvesChildLocations(testcase)
             store = getZarrStore("s3://bucket/example.zarr");
 
             testcase.verifyClass(store, "TensorStoreBackedStore");
@@ -36,13 +36,38 @@ classdef tZarrStore < matlab.unittest.TestCase
                 "s3://bucket/example.zarr/child/zarr.json");
         end
 
-        function remotePrototypeReportsUnsupportedOperations(testcase)
-            store = getZarrStore("s3://bucket/example.zarr");
+        function remoteStoreHandlesMetadataOperationsWithFileKvStore(testcase)
+            Zarr.pySetup();
+            rootPath = string(tempname);
+            mkdir(rootPath);
+            testcase.addTeardown(@()rmdir(rootPath, 's'));
+            schema = py.dict(pyargs("driver", "file", ...
+                "path", char(fullfile(rootPath, "example.zarr"))));
+            store = TensorStoreBackedStore("s3://bucket/example.zarr", schema);
 
-            testcase.verifyError(@() store.exists("zarr.json"), ...
-                "MATLAB:ZarrStore:unsupportedOperation");
-            testcase.verifyError(@() zarrinfo("s3://bucket/example.zarr"), ...
-                "MATLAB:ZarrStore:unsupportedOperation");
+            store.writeText(".zgroup", jsonencode(struct("zarr_format", "2")));
+            store.writeText("grp/.zarray", jsonencode(struct("zarr_format", "2")));
+            store.writeBytes("grp/data.bin", uint8([4 5 6]));
+
+            testcase.verifyTrue(store.exists(".zgroup"));
+            testcase.verifyTrue(store.isDirectory("grp"));
+            testcase.verifyEqual(char(store.readText(".zgroup")), '{"zarr_format":"2"}');
+            testcase.verifyEqual(store.readBytes("grp/data.bin"), uint8([4; 5; 6]));
+            testcase.verifyEqual(store.listChildren(""), "grp");
+        end
+
+        function remoteStoreMissingKeyErrors(testcase)
+            Zarr.pySetup();
+            rootPath = string(tempname);
+            mkdir(rootPath);
+            testcase.addTeardown(@()rmdir(rootPath, 's'));
+            schema = py.dict(pyargs("driver", "file", ...
+                "path", char(fullfile(rootPath, "example.zarr"))));
+            store = TensorStoreBackedStore("s3://bucket/example.zarr", schema);
+
+            testcase.verifyFalse(store.exists(".zgroup"));
+            testcase.verifyError(@() store.readText(".zgroup"), ...
+                "MATLAB:ZarrStore:keyNotFound");
         end
     end
 end

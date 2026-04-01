@@ -26,6 +26,19 @@ classdef tZarr < SharedZarrTestSetup
             end
         end
 
+        function verifyRemotePathHelpers(testcase)
+            [bucketName, objectPath, locationPrefix] = ...
+                Zarr.extractS3LocationParts("s3://mybucket/root/grp/arr");
+
+            testcase.verifyEqual(bucketName, "mybucket");
+            testcase.verifyEqual(objectPath, "root/grp/arr");
+            testcase.verifyEqual(locationPrefix, "s3://mybucket");
+            testcase.verifyEqual(Zarr.getParentPath("s3://mybucket/root/grp/arr"), ...
+                "s3://mybucket/root/grp");
+            testcase.verifyEqual(Zarr.getAncestorPaths("s3://mybucket/root/grp/arr"), ...
+                ["s3://mybucket/root", "s3://mybucket/root/grp", "s3://mybucket/root/grp/arr"]);
+        end
+
         function verifyReload(testcase)
             % Verify that calling reload method does not cause any issues
 

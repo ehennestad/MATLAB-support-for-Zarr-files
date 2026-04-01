@@ -1,12 +1,21 @@
 function zarrgroupcreate(filepath, options)
-%ZARRGROUPCREATE Create a filesystem-backed Zarr group hierarchy.
+%ZARRGROUPCREATE Create a Zarr group hierarchy on a supported backend.
 
 arguments
     filepath {mustBeTextScalar, mustBeNonzeroLengthText}
     options.ZarrFormat (1,1) double {mustBeMember(options.ZarrFormat, [2 3])} = 3
 end
 
-fullPath = Zarr.getFullPath(string(filepath));
+filepath = string(filepath);
+if Zarr.isRemotePath(filepath)
+    remotePaths = Zarr.getAncestorPaths(filepath);
+    for i = 1:numel(remotePaths)
+        createOrValidateGroup(remotePaths(i), options.ZarrFormat);
+    end
+    return
+end
+
+fullPath = Zarr.getFullPath(filepath);
 if fullPath == ""
     error("MATLAB:Zarr:invalidPath", ...
         "Unable to access path ""%s"".", filepath)

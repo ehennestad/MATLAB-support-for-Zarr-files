@@ -87,6 +87,101 @@ def createZarr3(kvstore_schema, metadata_json):
     schema['delete_existing'] = True
     ts.open(schema).result()
     return schema
+
+
+def _clone_kvstore_schema(kvstore_schema):
+    """
+    Return a mutable copy of a KvStore schema.
+    """
+    return dict(kvstore_schema)
+
+
+def _normalize_kvstore_prefix(path):
+    """
+    Normalize a KvStore prefix so relative keys append with a single slash.
+    """
+    path = path or ''
+    if not path:
+        return ''
+    return path.rstrip('/') + '/'
+
+
+def _open_prefixed_kvstore(kvstore_schema, prefix=""):
+    """
+    Open a KvStore rooted at the requested prefix below the base schema path.
+    """
+    schema = _clone_kvstore_schema(kvstore_schema)
+    base_path = _normalize_kvstore_prefix(schema.get('path', ''))
+    prefix = str(prefix or '').strip('/')
+    if prefix:
+        schema['path'] = base_path + prefix + '/'
+    else:
+        schema['path'] = base_path
+    return ts.KvStore.open(schema).result()
+
+
+def kvKeyExists(kvstore_schema, key):
+    """
+    Return True if the specified key exists.
+    """
+    store = _open_prefixed_kvstore(kvstore_schema)
+    result = store.read(str(key)).result()
+    return result.state == 'value'
+
+
+def kvPrefixExists(kvstore_schema, prefix=""):
+    """
+    Return True if the specified prefix contains at least one key.
+    """
+    store = _open_prefixed_kvstore(kvstore_schema, prefix=prefix)
+    return len(store.list().result()) > 0
+
+
+def kvReadBytes(kvstore_schema, key):
+    """
+    Read a key and return a list of byte values, or None if missing.
+    """
+    store = _open_prefixed_kvstore(kvstore_schema)
+    result = store.read(str(key)).result()
+    if result.state != 'value':
+        return None
+    return list(result.value)
+
+
+def kvReadText(kvstore_schema, key):
+    """
+    Read a UTF-8 text key, or None if missing.
+    """
+    data = kvReadBytes(kvstore_schema, key)
+    if data is None:
+        return None
+    return bytes(data).decode('utf-8')
+
+
+def kvWriteBytes(kvstore_schema, key, value):
+    """
+    Write bytes to a key.
+    """
+    store = _open_prefixed_kvstore(kvstore_schema)
+    payload = bytes(bytearray(int(x) for x in value))
+    store.write(str(key), payload).result()
+
+
+def kvWriteText(kvstore_schema, key, text):
+    """
+    Write UTF-8 text to a key.
+    """
+    store = _open_prefixed_kvstore(kvstore_schema)
+    store.write(str(key), str(text).encode('utf-8')).result()
+
+
+def kvList(kvstore_schema, prefix=""):
+    """
+    List all keys below the requested prefix, relative to that prefix.
+    """
+    store = _open_prefixed_kvstore(kvstore_schema, prefix=prefix)
+    keys = store.list().result()
+    return [key.decode('utf-8') if isinstance(key, bytes) else str(key) for key in keys]
             
 def writeZarr (kvstore_schema, data, driver='zarr', metadata_json=""):
     """

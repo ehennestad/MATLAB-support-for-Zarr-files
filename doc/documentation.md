@@ -5,7 +5,10 @@ Please find examples of the usage of these functions in `examples.md`.
 
 Please refer to `README.md` for installation instructions and third-party dependencies.
 * The use of this repository requires MATLAB release R2024a or newer.
-* Currently, only Zarr v2 is supported.
+* Local filesystem support includes Zarr v2 and the tested Zarr v3 subset.
+* Amazon S3 is the first supported remote backend.
+* Remote support currently covers metadata access, listing, group creation, and Zarr v2 array creation/read/write.
+* Remote Zarr v3 creation is not supported yet.
 
 ## `zarrcreate(FILEPATH, DATASIZE, Name=Value)`
 Create a Zarr array at the path specified by `FILEPATH` and of the dimensions specified

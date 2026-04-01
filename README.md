@@ -8,9 +8,10 @@ This repository provides an interface to read and write Zarr arrays and metadata
 For complete documentation, refer to the `documentation.md` file, or refer to the help section of each function.
 
 ## Status
-- Supports only Zarr v2.
-- Supports reading and writing of Zarr arrays from local storage and Amazon S3.
-- Supports reading and writing of Zarr metadata from local storage and Amazon S3.
+- Supports Zarr v2 and the tested Zarr v3 subset for local filesystem stores.
+- Supports Amazon S3 as the first remote backend for metadata access, listing, group creation, and Zarr v2 array creation/read/write.
+- Supports reading and writing existing remote Zarr arrays through TensorStore, including remote Zarr v3 reads and writes when compatible metadata already exists.
+- Remote Zarr v3 creation is not supported yet.
 
 ## Setup
 To use this repository, clone the repo to your local folder and add it to your MATLAB using [addpath](https://www.mathworks.com/help/matlab/ref/addpath.html).

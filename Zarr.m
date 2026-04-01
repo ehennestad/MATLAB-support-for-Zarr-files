@@ -257,40 +257,145 @@ classdef Zarr < handle
         end
 
         function [bucketName, objectPath] = extractS3BucketNameAndPath(url)
-            % Helper function to extract S3 bucket name and path to file
-            % bucketName and objectPath are needed to fill the KVstore hash
-            % map for tensorstore.
-            % Define the regular expression patterns for matching S3 URLs and URIs
-            % S3 URLs can have the following patterns.
-            patterns = { ...
-                '^https://([^.]+)\.s3\.([^.]+)\.amazonaws\.com/(.+)$', ... % 1: AWS virtual-hosted, region (https://mybucket.s3.us-west-2.amazonaws.com/path/to/myZarrFile)
-                '^https://([^.]+)\.s3\.amazonaws\.com/(.+)$', ...          % 2: AWS virtual-hosted, no region (https://mybucket.s3.amazonaws.com/path/to/myZarrFile)
-                '^https://([^.]+)\.s3\.[^/]+/(.+)$', ...                   % 3: Custom endpoint virtual-hosted (https://mybucket.s3.custom-endpoint.org/path/to/myZarrFile)
-                '^https://s3\.amazonaws\.com/([^/]+)/(.+)$', ...           % 4: AWS path-style (https://s3.amazonaws.com/mybucket/path/to/myZarrFile)
-                '^https://s3\.[^/]+/([^/]+)/(.+)$', ...                    % 5: Custom endpoint path-style (https://s3.eu-central-1.example.edu/mybucket/path/to/myZarrFile)
-                '^s3://([^/]+)/(.+)$' ...                                  % 6: S3 URI (s3://mybucket/path/to/myZarrFile)
-                };
+            % Helper function to extract S3 bucket name and object path.
+            [bucketName, objectPath, ~] = Zarr.extractS3LocationParts(url);
+            bucketName = char(bucketName);
+            objectPath = char(objectPath);
+        end
 
-            % For each pattern, specify which group is bucket and which is path
-            % regexp will extract multiple tokens from the patterns above.
-            % For each pattern, the indices below denote the location of
-            % the bucket and the path name.
-            bucketIdx = [1, 1, 1, 1, 1, 1];
-            pathIdx   = [3, 2, 2, 2, 2, 2];
+        function [bucketName, objectPath, locationPrefix] = extractS3LocationParts(url)
+            % Helper function to extract S3 bucket name, object path, and
+            % path prefix shared by all descendants of the location.
+            url = char(string(url));
+            tokens = regexp(url, '^https://([^.]+)\.s3\.([^.]+)\.amazonaws\.com', ...
+                'tokens', 'once');
+            if ~isempty(tokens)
+                bucketName = string(tokens{1});
+                locationPrefix = "https://" + tokens{1} + ".s3." + tokens{2} + ".amazonaws.com";
+                objectPath = Zarr.extractRemainingPath(url, locationPrefix);
+                return
+            end
 
-            % Iterate through the patterns and identify the pattern which matches the
-            % URI. Extract the bucket name and the path.
-            for patternIdx = 1:numel(patterns)
-                tokens = regexp(url, patterns{patternIdx}, 'tokens');
-                if ~isempty(tokens)
-                    t = tokens{1};
-                    bucketName = t{bucketIdx(patternIdx)};
-                    objectPath = t{pathIdx(patternIdx)};
-                    return;
-                end
+            tokens = regexp(url, '^https://([^.]+)\.s3\.amazonaws\.com', ...
+                'tokens', 'once');
+            if ~isempty(tokens)
+                bucketName = string(tokens{1});
+                locationPrefix = "https://" + tokens{1} + ".s3.amazonaws.com";
+                objectPath = Zarr.extractRemainingPath(url, locationPrefix);
+                return
+            end
+
+            tokens = regexp(url, '^https://([^.]+)\.s3\.([^/]+)', ...
+                'tokens', 'once');
+            if ~isempty(tokens)
+                bucketName = string(tokens{1});
+                locationPrefix = "https://" + tokens{1} + ".s3." + tokens{2};
+                objectPath = Zarr.extractRemainingPath(url, locationPrefix);
+                return
+            end
+
+            tokens = regexp(url, '^https://s3\.amazonaws\.com/([^/]+)', ...
+                'tokens', 'once');
+            if ~isempty(tokens)
+                bucketName = string(tokens{1});
+                locationPrefix = "https://s3.amazonaws.com/" + tokens{1};
+                objectPath = Zarr.extractRemainingPath(url, locationPrefix);
+                return
+            end
+
+            tokens = regexp(url, '^https://s3\.([^/]+)/([^/]+)', ...
+                'tokens', 'once');
+            if ~isempty(tokens)
+                bucketName = string(tokens{2});
+                locationPrefix = "https://s3." + tokens{1} + "/" + tokens{2};
+                objectPath = Zarr.extractRemainingPath(url, locationPrefix);
+                return
+            end
+
+            tokens = regexp(url, '^s3://([^/]+)', 'tokens', 'once');
+            if ~isempty(tokens)
+                bucketName = string(tokens{1});
+                locationPrefix = "s3://" + tokens{1};
+                objectPath = Zarr.extractRemainingPath(url, locationPrefix);
+                return
             end
 
             error("MATLAB:Zarr:invalidS3URL","Invalid S3 URI format.");
+        end
+
+        function tf = isRemotePath(path)
+            tf = matlab.io.internal.vfs.validators.hasIriPrefix(string(path));
+        end
+
+        function parentPath = getParentPath(path)
+            path = string(path);
+            if Zarr.isRemotePath(path)
+                [~, objectPath, locationPrefix] = Zarr.extractS3LocationParts(path);
+                if objectPath == ""
+                    parentPath = path;
+                    return
+                end
+
+                objectParts = split(objectPath, "/");
+                objectParts = objectParts(objectParts ~= "");
+                if numel(objectParts) <= 1
+                    parentPath = locationPrefix;
+                else
+                    parentPath = locationPrefix + "/" + join(objectParts(1:end-1), "/");
+                end
+                return
+            end
+
+            [parentPath, ~, ~] = fileparts(path);
+        end
+
+        function paths = getAncestorPaths(path)
+            % Return ancestor paths from the shallowest child to the input path.
+            path = string(path);
+            if Zarr.isRemotePath(path)
+                [~, objectPath, locationPrefix] = Zarr.extractS3LocationParts(path);
+                objectParts = split(objectPath, "/");
+                objectParts = objectParts(objectParts ~= "");
+                paths = strings(1, 0);
+                for idx = 1:numel(objectParts)
+                    paths(end+1) = locationPrefix + "/" + join(objectParts(1:idx), "/"); %#ok<AGROW>
+                end
+                return
+            end
+
+            pathParts = split(path, filesep);
+            pathParts = pathParts(pathParts ~= "");
+            if startsWith(path, filesep)
+                currentPath = filesep;
+            else
+                currentPath = "";
+            end
+
+            paths = strings(1, 0);
+            for idx = 1:numel(pathParts)
+                if currentPath == "" || currentPath == filesep
+                    currentPath = fullfile(currentPath, pathParts(idx));
+                else
+                    currentPath = fullfile(currentPath, pathParts(idx));
+                end
+                paths(end+1) = currentPath; %#ok<AGROW>
+            end
+        end
+
+        function objectPath = extractRemainingPath(url, locationPrefix)
+            url = string(url);
+            locationPrefix = string(locationPrefix);
+            if strlength(url) <= strlength(locationPrefix)
+                objectPath = "";
+                return
+            end
+
+            if startsWith(url, locationPrefix + "/")
+                objectPath = extractAfter(url, locationPrefix + "/");
+            else
+                objectPath = "";
+            end
+            objectPath = strip(objectPath, "/");
         end
     end
 
@@ -388,6 +493,11 @@ classdef Zarr < handle
             obj.ChunkSize = int64(chunk_size);
             obj.Datatype = ZarrDatatype.fromMATLABType(dtype);
             obj.FillValue = obj.validateFillValue(fillvalue, dtype, zarrFormat);
+
+            if obj.isRemote
+                obj.createRemote(dtype, compression, zarrFormat, dimensionNames);
+                return
+            end
             
             % see how much of the provided path exists already 
             existingParentPath = Zarr.getExistingParentFolder(obj.Path);
@@ -484,6 +594,42 @@ classdef Zarr < handle
     end
 
     methods (Access = protected)
+        function createRemote(obj, dtype, compression, zarrFormat, dimensionNames)
+            % Create a remote Zarr array using backend-aware ancestor validation.
+            %#ok<INUSD>
+            if zarrFormat ~= 2
+                error("MATLAB:ZarrStore:unsupportedLocation", ...
+                    "Remote array creation currently supports only Zarr v2.");
+            end
+
+            parentPath = Zarr.getParentPath(obj.Path);
+            obj.validateRemoteCreateParent(parentPath);
+            [~, ~, rootLocation] = Zarr.extractS3LocationParts(obj.Path);
+
+            if isempty(compression)
+                obj.Compression = py.None;
+            else
+                obj.Compression = obj.parseCompression(compression);
+            end
+
+            try
+                obj.TensorstoreSchema = Zarr.ZarrPy.createZarr( ...
+                    obj.KVStoreSchema, py.numpy.array(obj.DsetSize), ...
+                    py.numpy.array(obj.ChunkSize), obj.Datatype.TensorstoreType, ...
+                    obj.Datatype.ZarrType, obj.Compression, obj.FillValue);
+            catch ME
+                if strcmp(ME.identifier, "MATLAB:Python:PyException")
+                    error("MATLAB:Zarr:invalidPath", ...
+                        "Unable to access path ""%s"".", obj.Path)
+                end
+                rethrow(ME)
+            end
+
+            if parentPath ~= "" && parentPath ~= rootLocation
+                zarrgroupcreate(parentPath, ZarrFormat=zarrFormat);
+            end
+        end
+
         function info = getArrayInfo(obj)
             % Load array metadata and normalize errors to the Zarr API.
             try
@@ -613,6 +759,30 @@ classdef Zarr < handle
             if strcmp(string(parentInfo.node_type), "array")
                 error("MATLAB:Zarr:invalidParentPath", ...
                     "Cannot create a Zarr array inside an existing Zarr array path.");
+            end
+        end
+
+        function validateRemoteCreateParent(~, parentPath)
+            % Prevent creating remote arrays inside existing remote arrays.
+            if parentPath == ""
+                return
+            end
+
+            remoteParents = Zarr.getAncestorPaths(parentPath);
+            for idx = 1:numel(remoteParents)
+                try
+                    parentInfo = zarrinfo(remoteParents(idx));
+                catch ME
+                    if strcmp(ME.identifier, 'MATLAB:zarrinfo:invalidZarrObject')
+                        continue
+                    end
+                    rethrow(ME)
+                end
+
+                if strcmp(string(parentInfo.node_type), "array")
+                    error("MATLAB:Zarr:invalidParentPath", ...
+                        "Cannot create a Zarr array inside an existing Zarr array path.");
+                end
             end
         end
 

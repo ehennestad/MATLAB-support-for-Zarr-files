@@ -1,5 +1,5 @@
 function listing = zarrlist(filepath)
-%ZARRLIST List direct child Zarr arrays and groups in a filesystem group.
+%ZARRLIST List direct child Zarr arrays and groups in a supported group store.
 
 arguments
     filepath {mustBeTextScalar, mustBeNonzeroLengthText}
