@@ -56,14 +56,30 @@ classdef Zarr < handle
 
         function isZarray = isZarrArray(path)
             % Given a path, determine if it is a Zarr array
-
-            isZarray = isfile(fullfile(path, '.zarray'));
+            try
+                metadata = locateZarrMetadata(path);
+                isZarray = metadata.node_type == "array";
+            catch ME
+                if strcmp(ME.identifier, 'MATLAB:zarrinfo:invalidZarrObject')
+                    isZarray = false;
+                else
+                    rethrow(ME)
+                end
+            end
         end
 
         function isZgroup = isZarrGroup(path)
             % Given a path, determine if it is a Zarr group
-
-            isZgroup = isfile(fullfile(path, '.zgroup'));
+            try
+                metadata = locateZarrMetadata(path);
+                isZgroup = metadata.node_type == "group";
+            catch ME
+                if strcmp(ME.identifier, 'MATLAB:zarrinfo:invalidZarrObject')
+                    isZgroup = false;
+                else
+                    rethrow(ME)
+                end
+            end
         end
 
         function newParams = processPartialReadParams(params, dims,...
@@ -307,19 +323,8 @@ classdef Zarr < handle
         function data = read(obj, start, count, stride)
             % Function to read the Zarr array
 
-            % If the Zarr array is local, verify that it is a valid folder
-            % Enabling this check only for local Zarr files and S3 hosted
-            % Zarr files in the s3:// syntax (for now) because https S3
-            % links will fail this check even if they are valid.
-            if ~startsWith(obj.Path, 'http')
-                if ~Zarr.isZarrArray(obj.Path)
-                    error("MATLAB:Zarr:invalidZarrObject",...
-                        "Invalid file path. File path must refer to a valid Zarr array.");
-                end
-            end
-
-            % Validate partial read parameters
-            info = zarrinfo(obj.Path);
+            % Validate partial read parameters against array metadata.
+            info = obj.getArrayInfo();
             numDims = numel(info.shape);
             start = Zarr.processPartialReadParams(start, info.shape,...
                 ones([1,numDims]), "Start");
@@ -342,8 +347,11 @@ classdef Zarr < handle
             % (it does NOT include element at the end index)
             endInds = start + stride.*count;
 
+            [driver, metadataJSON] = obj.getReadTensorStoreSpec(info);
+
             % Store the datatype
-            obj.Datatype = ZarrDatatype.fromZarrType(info.dtype);
+            obj.Datatype = ZarrDatatype.fromMetadataType( ...
+                obj.getMetadataDatatype(info), info.zarr_format);
 
             % Check if reading requested data might exceed available memory
             try
@@ -360,7 +368,7 @@ classdef Zarr < handle
 
             % Read the data
             ndArrayData = Zarr.ZarrPy.readZarr(obj.KVStoreSchema,...
-                start, endInds, stride);
+                start, endInds, stride, driver, metadataJSON);
 
             % Convert the numpy array to MATLAB array
             data = cast(ndArrayData, obj.Datatype.MATLABType);
@@ -452,6 +460,65 @@ classdef Zarr < handle
     end
 
     methods (Access = protected)
+        function info = getArrayInfo(obj)
+            % Load array metadata and normalize errors to the Zarr API.
+            try
+                info = zarrinfo(obj.Path);
+            catch ME
+                if any(strcmp(ME.identifier, {'MATLAB:zarrinfo:invalidZarrObject', ...
+                        'MATLAB:ZarrStore:unsupportedLocation'}))
+                    error("MATLAB:Zarr:invalidZarrObject",...
+                        "Invalid file path. File path must refer to a valid Zarr array.");
+                end
+                rethrow(ME)
+            end
+
+            if ~isfield(info, 'node_type') || ~strcmp(string(info.node_type), "array")
+                error("MATLAB:Zarr:invalidZarrObject",...
+                    "Invalid file path. File path must refer to a valid Zarr array.");
+            end
+        end
+
+        function [driver, metadataJSON] = getReadTensorStoreSpec(~, info)
+            % Build the TensorStore read spec from normalized metadata.
+            metadataJSON = "";
+
+            if info.zarr_format == 2
+                driver = "zarr";
+                return
+            end
+
+            driver = "zarr3";
+            metadata = struct( ...
+                "zarr_format", 3, ...
+                "node_type", "array", ...
+                "shape", reshape(info.shape, 1, []), ...
+                "data_type", char(string(info.data_type)), ...
+                "chunk_grid", info.chunk_grid, ...
+                "chunk_key_encoding", info.chunk_key_encoding, ...
+                "codecs", info.codecs, ...
+                "fill_value", info.fill_value);
+
+            if isfield(info, 'attributes') && ~isempty(info.attributes)
+                metadata.attributes = info.attributes;
+            end
+
+            if isfield(info, 'dimension_names') && ~isempty(info.dimension_names)
+                metadata.dimension_names = info.dimension_names;
+            end
+
+            metadataJSON = jsonencode(metadata);
+        end
+
+        function dtype = getMetadataDatatype(~, info)
+            % Return the dtype field used by the current Zarr metadata version.
+            if info.zarr_format == 2
+                dtype = string(info.dtype);
+            else
+                dtype = string(info.data_type);
+            end
+        end
+
         function compression = parseCompression(~,compression)
             % Helper function to validate and parse the compression struct.
 

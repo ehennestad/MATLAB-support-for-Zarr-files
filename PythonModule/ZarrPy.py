@@ -4,6 +4,7 @@ The module has functions for creating Zarr files, writing to Zarr files and read
 
 Copyright 2025 The MathWorks, Inc.
 """
+import json
 import numpy as np
 import tensorstore as ts
 
@@ -62,8 +63,32 @@ def createZarr(kvstore_schema, data_shape, chunk_shape, tstoreDataType, zarrData
     }
     zarr_file = ts.open(schema).result()
     return schema
+
+
+def _build_schema(kvstore_schema, driver='zarr', metadata_json=""):
+    """
+    Build a TensorStore schema for either Zarr v2 or Zarr v3 access.
+    """
+    schema = {
+        'driver': driver,
+        'kvstore': kvstore_schema,
+    }
+    if metadata_json:
+        schema['metadata'] = json.loads(metadata_json)
+    return schema
+
+
+def createZarr3(kvstore_schema, metadata_json):
+    """
+    Creates a new Zarr v3 array using explicit metadata.
+    """
+    schema = _build_schema(kvstore_schema, driver='zarr3', metadata_json=metadata_json)
+    schema['create'] = True
+    schema['delete_existing'] = True
+    ts.open(schema).result()
+    return schema
             
-def writeZarr (kvstore_schema, data):
+def writeZarr (kvstore_schema, data, driver='zarr', metadata_json=""):
     """
     Writes data to a Zarr file.
 
@@ -71,17 +96,23 @@ def writeZarr (kvstore_schema, data):
     - kvstore_schema (dictionary): Schema for the file store (local or remote)
     - data (numpy.ndarray): The data to write to the Zarr file.
     """
-    schema = {
-    'driver': 'zarr',
-    'kvstore': kvstore_schema
-    }
+    schema = _build_schema(kvstore_schema, driver=driver, metadata_json=metadata_json)
     zarr_file = ts.open(schema).result()
     
     # Write data to the Zarr file
     zarr_file[...] = data
 
 
-def readZarr (kvstore_schema, starts, ends, strides):
+def writeZarrRegion(kvstore_schema, data, starts, ends, driver='zarr', metadata_json=""):
+    """
+    Writes a subset of data to a Zarr file.
+    """
+    zarr_file = ts.open(_build_schema(kvstore_schema, driver=driver, metadata_json=metadata_json)).result()
+    slices = tuple(slice(int(start), int(end)) for start, end in zip(starts, ends))
+    zarr_file[slices] = data
+
+
+def readZarr (kvstore_schema, starts, ends, strides, driver='zarr', metadata_json=""):
     """
     Reads a subset of data from a Zarr file.
 
@@ -95,10 +126,7 @@ def readZarr (kvstore_schema, starts, ends, strides):
     Returns:
     - numpy.ndarray: The subset of the data read from the Zarr file.
     """
-    zarr_file = ts.open({
-        'driver': 'zarr',
-        'kvstore': kvstore_schema,
-    }).result()
+    zarr_file = ts.open(_build_schema(kvstore_schema, driver=driver, metadata_json=metadata_json)).result()
     
     # Construct the indexing slices
     slices = tuple(slice(start, end, stride) for start, end, stride in zip(starts, ends, strides))

@@ -13,6 +13,8 @@ classdef ZarrDatatype
             "uint32", "int32", "uint64", "int64", "float32", "float64"];
         ZarrTypes   = ["|b1", "|u1", "|i1", "<u2", "<i2",...
             "<u4", "<i4", "<u8", "<i8", "<f4", "<f8"];
+        ZarrV3Types = ["bool", "uint8", "int8", "uint16", "int16",...
+            "uint32", "int32", "uint64", "int64", "float32", "float64"];
     end
     
     properties (SetAccess = immutable, GetAccess=private, Hidden)
@@ -24,6 +26,7 @@ classdef ZarrDatatype
         % Dependent properties representing the corresponding datatype in
         % Zarr, Tensorstore, and MATLAB
         ZarrType
+        ZarrV3Type
         TensorstoreType
         MATLABType
     end
@@ -45,6 +48,11 @@ classdef ZarrDatatype
         function tType = get.TensorstoreType(obj)
             % Get the corresponding Tensorstore datatype
             tType = ZarrDatatype.TensorstoreTypes(obj.Index);
+        end
+
+        function zType = get.ZarrV3Type(obj)
+            % Get the corresponding Zarr v3 datatype
+            zType = ZarrDatatype.ZarrV3Types(obj.Index);
         end
 
         function mType = get.MATLABType(obj)
@@ -84,6 +92,30 @@ classdef ZarrDatatype
             obj = ZarrDatatype(ind);
         end
 
+        function obj = fromV3Type(zarrType)
+            % Create a datatype object based on Zarr v3 datatype name
+            ind = find(zarrType == ZarrDatatype.ZarrV3Types);
+            if isempty(ind)
+                error("MATLAB:ZarrDatatype:unsupportedV3Type", ...
+                    "Unsupported Zarr v3 datatype ""%s"".", zarrType)
+            end
+            obj = ZarrDatatype(ind);
+        end
+
+        function obj = fromMetadataType(type, zarrFormat)
+            % Create a datatype object based on metadata datatype and version
+            arguments
+                type (1,1) string
+                zarrFormat (1,1) double {mustBeMember(zarrFormat, [2, 3])}
+            end
+
+            if zarrFormat == 2
+                obj = ZarrDatatype.fromZarrType(type);
+            else
+                obj = ZarrDatatype.fromV3Type(type);
+            end
+        end
+
         function mustBeMATLABType(type)
             % Validator for MATLAB types
             mustBeMember(type, ZarrDatatype.MATLABTypes);
@@ -95,7 +127,7 @@ classdef ZarrDatatype
         end
 
         function mustBeZarrType(type)
-            % Validator for Zarr types
+            % Validator for Zarr v2 types
             mustBeMember(type, ZarrDatatype.ZarrTypes)
         end
     end
