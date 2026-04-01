@@ -15,36 +15,74 @@ arguments
     filepath {mustBeTextScalar, mustBeNonzeroLengthText}
 end
 
-% .zarray and .zgroup are valid metadata files for Zarr v2 which contain
-% library-defined attributes. zarr.json is valid metadata file for Zarr v3
-% containing library-defined attributes.
-% If the location is a Zarr array
-if isfile(fullfile(filepath, '.zarray'))
-    infoStr = fileread(fullfile(filepath, '.zarray'));
-    infoStruct = jsondecode(infoStr);
-    infoStruct.node_type = 'array';
-% If the location is a Zarr group    
-elseif isfile(fullfile(filepath, '.zgroup'))
-    infoStr = fileread(fullfile(filepath, '.zgroup'));
-    infoStruct = jsondecode(infoStr);
-    infoStruct.node_type = 'group';
-% Supporting zarr.json for zarr v3 (low hanging fruit for future)
-elseif isfile(fullfile(filepath, 'zarr.json'))
-    infoStr = fileread(fullfile(filepath, 'zarr.json'));
-    infoStruct = jsondecode(infoStr);
-% Else, error if it is not an array or group
+store = getZarrStore(filepath);
+metadata = locateZarrMetadata(filepath);
+infoStruct = jsondecode(store.readText(metadata.key));
+
+if metadata.zarr_format == 2
+    infoStruct.node_type = char(metadata.node_type);
+
+    % User defined attributes are contained in .zattrs file in each array or group store
+    if store.exists('.zattrs')
+        userDefinedInfoStruct = readZattrs(filepath);
+        userDefinedFieldNames = fieldnames(userDefinedInfoStruct);
+        for i = 1:numel(userDefinedFieldNames)
+            infoStruct.(userDefinedFieldNames{i}) = userDefinedInfoStruct.(userDefinedFieldNames{i});
+        end
+    end
 else
-    error("MATLAB:zarrinfo:invalidZarrObject",...
-        "Invalid file path. File path must refer to a valid Zarr array or group.");
+    infoStruct = normalizeV3Info(infoStruct, filepath, store, metadata);
 end
 
-% User defined attributes are contained in .zattrs file in each array or group store
-if isfile(fullfile(filepath, '.zattrs'))
+end
+
+function infoStruct = normalizeV3Info(infoStruct, filepath, store, metadata)
+if ~isfield(infoStruct, 'zarr_format') || isempty(infoStruct.zarr_format)
+    infoStruct.zarr_format = metadata.zarr_format;
+end
+
+if ~isfield(infoStruct, 'node_type') || strlength(string(infoStruct.node_type)) == 0
+    infoStruct.node_type = char(metadata.node_type);
+else
+    infoStruct.node_type = char(string(infoStruct.node_type));
+end
+
+attributes = struct();
+if isfield(infoStruct, 'attributes') && ~isempty(infoStruct.attributes)
+    attributes = infoStruct.attributes;
+end
+
+if store.exists('.zattrs')
     userDefinedInfoStruct = readZattrs(filepath);
     userDefinedFieldNames = fieldnames(userDefinedInfoStruct);
     for i = 1:numel(userDefinedFieldNames)
-            infoStruct.(userDefinedFieldNames{i}) = userDefinedInfoStruct.(userDefinedFieldNames{i});
+        attributes.(userDefinedFieldNames{i}) = userDefinedInfoStruct.(userDefinedFieldNames{i});
     end
 end
+infoStruct.attributes = attributes;
 
+if strcmp(infoStruct.node_type, 'array')
+    if ~isfield(infoStruct, 'chunk_shape')
+        infoStruct.chunk_shape = [];
+        if isfield(infoStruct, 'chunk_grid') && isstruct(infoStruct.chunk_grid) ...
+                && isfield(infoStruct.chunk_grid, 'name') ...
+                && strcmp(string(infoStruct.chunk_grid.name), "regular") ...
+                && isfield(infoStruct.chunk_grid, 'configuration') ...
+                && isfield(infoStruct.chunk_grid.configuration, 'chunk_shape')
+            infoStruct.chunk_shape = infoStruct.chunk_grid.configuration.chunk_shape;
+        end
+    end
+
+    if ~isfield(infoStruct, 'dimension_names')
+        infoStruct.dimension_names = [];
+    end
+    
+    if ~isfield(infoStruct, 'fill_value')
+        infoStruct.fill_value = [];
+    end
+
+    if ~isfield(infoStruct, 'codecs')
+        infoStruct.codecs = [];
+    end
+end
 end

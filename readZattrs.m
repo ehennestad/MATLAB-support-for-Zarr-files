@@ -4,8 +4,14 @@ function zattrsStruct = readZattrs(filepath)
 
 %   Copyright 2025 The MathWorks, Inc.
 
-userDefinedInfoStr = fileread(fullfile(filepath, '.zattrs'));
 zattrsStruct = struct();
+store = getZarrStore(filepath);
+
+if ~store.exists('.zattrs')
+    return
+end
+
+userDefinedInfoStr = store.readText('.zattrs');
 
 % If .zattrs file exists and is not empty
 if ~isempty(userDefinedInfoStr)

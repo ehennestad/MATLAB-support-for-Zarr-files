@@ -176,28 +176,35 @@ classdef Zarr < handle
 
         end
 
-        function createGroup(pathToGroup)
+        function createGroup(pathToGroup, zarrFormat)
             % Create a Zarr group including creating the directory (if
             % needed) and the .zgroup file. Assumes the parent directory
             % exists
-
-            if ~isfolder(pathToGroup)
-                mkdir(pathToGroup)
+            if nargin < 2
+                zarrFormat = 2;
             end
 
-            % Currently we support only Zarr v2
-            groupJSON = jsonencode(struct("zarr_format", "2"));
+            store = getZarrStore(pathToGroup);
+            store.makeDir("");
 
-            % Write .zgroup file
-            groupFile = fullfile(pathToGroup, ".zgroup");
-            fid = fopen(groupFile, 'w');
-            if fid == -1
-                error("MATLAB:Zarr:fileOpenFailure",...
-                    "Could not open file ""%s"" for writing.",groupFile);
+            if store.exists('.zarray') || store.exists('zarr.json')
+                error("MATLAB:Zarr:invalidZarrObject",...
+                    "Invalid file path. File path must refer to a valid Zarr group.");
             end
-            closeFile = onCleanup(@() fclose(fid));
 
-            fwrite(fid, groupJSON, 'char');
+            if zarrFormat == 2
+                metadataFile = '.zgroup';
+                groupJSON = jsonencode(struct("zarr_format", "2"));
+            else
+                metadataFile = 'zarr.json';
+                groupJSON = jsonencode(struct( ...
+                    "attributes", struct(), ...
+                    "zarr_format", 3, ...
+                    "consolidated_metadata", [], ...
+                    "node_type", "group"));
+            end
+
+            store.writeText(metadataFile, groupJSON);
         end
 
         function makeZarrGroups(existingParentPath, newGroupsPath)
