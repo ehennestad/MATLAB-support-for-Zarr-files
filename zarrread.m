@@ -22,6 +22,11 @@ function data = zarrread(filepath, options)
 %   element in the corresponding dimension, and so on. If you do not
 %   specify stride, then the function reads data without skipping indices
 %   along each dimension.
+%
+%   DATA = ZARRREAD(..., Fields=fields) reads only the requested fields from
+%   a compound Zarr array. Specify fields as a text scalar or a vector of
+%   text values naming the fields to return. If you do not specify Fields,
+%   then ZARRREAD returns all fields.
 
 %   Copyright 2025 The MathWorks, Inc.
 
@@ -30,8 +35,9 @@ arguments
     options.Start (1,:) {mustBeNumeric, mustBeInteger, mustBePositive} = [];
     options.Count (1,:) {mustBeNumeric, mustBeInteger, mustBePositive} = [];
     options.Stride (1,:) {mustBeNumeric, mustBeInteger, mustBePositive} = [];
+    options.Fields = strings(1, 0);
 end
 
 zarrObj = Zarr(filepath);
-data = zarrObj.read(options.Start, options.Count, options.Stride);
+data = zarrObj.read(options.Start, options.Count, options.Stride, options.Fields);
 end

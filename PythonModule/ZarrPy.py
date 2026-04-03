@@ -230,3 +230,154 @@ def readZarr (kvstore_schema, starts, ends, strides, driver='zarr', metadata_jso
     data = zarr_file[slices].read().result()
     
     return data
+
+
+def readCompoundZarr(kvstore_schema, starts, ends, strides, field_names=None, driver='zarr'):
+    """
+    Read compound/structured data.
+
+    Zarr v2 compound data is read via TensorStore field access. Zarr v3
+    structured data is read via the Python zarr library because the current
+    TensorStore zarr3 driver only accepts scalar string data_type metadata.
+    """
+    requested_fields = _normalise_field_names(field_names)
+
+    if driver == 'zarr3':
+        return readZarrWithZarrLibrary(
+            kvstore_schema, starts, ends, strides,
+            field_names=requested_fields)
+
+    start_list, end_list, stride_list = _normalise_index_lists(starts, ends, strides)
+    slices = tuple(slice(start, end, stride) for start, end, stride in zip(start_list, end_list, stride_list))
+    result = {}
+    fallback_fields = []
+
+    for field_name in requested_fields:
+        try:
+            field_store = ts.open({
+                'driver': driver,
+                'kvstore': kvstore_schema,
+                'field': field_name,
+            }).result()
+            field_data = field_store[slices].read().result()
+            result[field_name] = _convert_field_data(field_data)
+        except Exception as exc:
+            error_msg = str(exc)
+            if 'Unsupported zarr dtype' in error_msg:
+                fallback_fields.append(field_name)
+            else:
+                raise exc
+
+    if fallback_fields:
+        result.update(readZarrWithZarrLibrary(
+            kvstore_schema, starts, ends, strides,
+            field_names=fallback_fields))
+
+    return {field_name: result[field_name] for field_name in requested_fields}
+
+
+def readZarrWithZarrLibrary(kvstore_schema, starts, ends, strides, field_names=None):
+    """
+    Read array data using the Python zarr library.
+
+    This is used for structured dtypes that the TensorStore bridge cannot
+    access directly, such as current Zarr v3 structured dtypes and selected
+    unsupported Zarr v2 structured fields.
+    """
+    try:
+        import zarr
+    except ImportError as exc:
+        raise ValueError('Reading structured data requires the "zarr" Python package to be installed.') from exc
+
+    driver = kvstore_schema.get('driver')
+    if driver == 'file':
+        zarr_location = str(kvstore_schema['path'])
+        zarr_array = zarr.open_array(zarr_location, mode='r')
+    elif driver == 's3':
+        try:
+            import s3fs
+        except ImportError as exc:
+            raise ValueError('Reading structured data from S3 requires the "s3fs" Python package to be installed.') from exc
+
+        bucket = kvstore_schema.get('bucket', '')
+        object_path = kvstore_schema.get('path', '')
+        root = f"{bucket}/{object_path.lstrip('/')}"
+        s3 = s3fs.S3FileSystem()
+        storage = s3fs.S3Map(root=root, s3=s3)
+        zarr_array = zarr.open_array(storage, mode='r')
+    else:
+        raise ValueError(f"Unsupported kvstore driver '{driver}' for zarr fallback")
+
+    start_list, end_list, stride_list = _normalise_index_lists(starts, ends, strides)
+    slices = tuple(slice(start, end, stride) for start, end, stride in zip(start_list, end_list, stride_list))
+    data = zarr_array[slices]
+
+    if getattr(data.dtype, 'names', None):
+        return _structured_array_to_dict(data, field_names=field_names)
+
+    return np.asarray(data)
+
+
+def _normalise_index_lists(starts, ends, strides):
+    def _to_list(value):
+        if isinstance(value, (int, type(None))):
+            return [value]
+        if isinstance(value, np.ndarray):
+            return value.tolist()
+        return list(value)
+
+    start_list = _to_list(starts)
+    end_list = _to_list(ends)
+    stride_list = _to_list(strides)
+
+    def _to_int(value, fallback=None):
+        if value is None:
+            return fallback
+        return int(value)
+
+    result = []
+    for values, fallback in zip((start_list, end_list, stride_list), (0, None, 1)):
+        converted = [_to_int(value, fallback) for value in values]
+        result.append(converted)
+
+    return tuple(result)
+
+
+def _structured_array_to_dict(array_data, field_names=None):
+    requested_fields = _normalise_field_names(field_names)
+    if not requested_fields:
+        requested_fields = list(array_data.dtype.names)
+
+    result = {}
+    for field_name in requested_fields:
+        field_data = np.asarray(array_data[field_name])
+        result[field_name] = _convert_field_data(field_data)
+
+    return result
+
+
+def _convert_field_data(field_data):
+    if isinstance(field_data, np.ndarray):
+        if field_data.dtype.kind in ('U', 'S', 'O'):
+            return field_data.tolist()
+        return field_data
+
+    if hasattr(field_data, 'dtype') and getattr(field_data.dtype, 'kind', None) in ('U', 'S', 'O'):
+        return field_data.tolist()
+
+    return field_data
+
+
+def _normalise_field_names(field_names):
+    if field_names is None:
+        return []
+
+    if isinstance(field_names, str):
+        return [field_names]
+
+    try:
+        values = [str(name) for name in field_names]
+    except TypeError:
+        return [str(field_names)]
+
+    return [value for value in values if value]

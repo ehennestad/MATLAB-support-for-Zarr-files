@@ -426,11 +426,16 @@ classdef Zarr < handle
         end
 
         
-        function data = read(obj, start, count, stride)
+        function data = read(obj, start, count, stride, fields)
             % Function to read the Zarr array
+            if nargin < 5
+                fields = strings(1, 0);
+            end
 
             % Validate partial read parameters against array metadata.
             info = obj.getArrayInfo();
+            obj.Datatype = ZarrDatatype.fromMetadataType( ...
+                obj.getMetadataDatatype(info), info.zarr_format);
             numDims = numel(info.shape);
             start = Zarr.processPartialReadParams(start, info.shape,...
                 ones([1,numDims]), "Start");
@@ -453,11 +458,21 @@ classdef Zarr < handle
             % (it does NOT include element at the end index)
             endInds = start + stride.*count;
 
-            [driver, metadataJSON] = obj.getTensorStoreSpec(info);
+            if obj.Datatype.IsCompound
+                requestedFields = obj.validateCompoundFieldSelection(fields);
+                driver = "zarr";
+                if info.zarr_format == 3
+                    driver = "zarr3";
+                end
 
-            % Store the datatype
-            obj.Datatype = ZarrDatatype.fromMetadataType( ...
-                obj.getMetadataDatatype(info), info.zarr_format);
+                ndArrayData = Zarr.ZarrPy.readCompoundZarr( ...
+                    obj.KVStoreSchema, start, endInds, stride, ...
+                    py.list(cellstr(requestedFields)), driver);
+                data = obj.convertCompoundData(ndArrayData, count, requestedFields);
+                return
+            end
+
+            [driver, metadataJSON] = obj.getTensorStoreSpec(info);
 
             % Check if reading requested data might exceed available memory
             try
@@ -679,15 +694,208 @@ classdef Zarr < handle
             end
 
             metadataJSON = jsonencode(metadata);
+            metadataJSON = Zarr.restoreSpecialV3AttributeNames(metadataJSON);
         end
 
         function dtype = getMetadataDatatype(~, info)
             % Return the dtype field used by the current Zarr metadata version.
             if info.zarr_format == 2
-                dtype = string(info.dtype);
+                dtype = info.dtype;
             else
-                dtype = string(info.data_type);
+                dtype = info.data_type;
             end
+        end
+
+        function requestedFields = validateCompoundFieldSelection(obj, fields)
+            % Normalize and validate the requested compound field names.
+            compoundFields = [obj.Datatype.CompoundFields{:}];
+            availableFields = string(arrayfun(@(f) char(f.name), compoundFields, ...
+                'UniformOutput', false));
+
+            if isempty(fields)
+                requestedFields = availableFields;
+                return
+            end
+
+            if ischar(fields) || (isstring(fields) && isscalar(fields))
+                requestedFields = string(fields);
+            elseif isstring(fields)
+                requestedFields = reshape(fields, 1, []);
+            elseif iscell(fields)
+                try
+                    requestedFields = string(fields);
+                catch
+                    error("MATLAB:zarrread:invalidFields", ...
+                        "Specify Fields as text values naming compound fields.");
+                end
+                requestedFields = reshape(requestedFields, 1, []);
+            else
+                error("MATLAB:zarrread:invalidFields", ...
+                    "Specify Fields as text values naming compound fields.");
+            end
+
+            if any(strlength(requestedFields) == 0)
+                error("MATLAB:zarrread:invalidFields", ...
+                    "Fields must contain non-empty field names.");
+            end
+
+            if numel(unique(requestedFields)) ~= numel(requestedFields)
+                error("MATLAB:zarrread:duplicateFields", ...
+                    "Fields must not contain duplicate compound field names.");
+            end
+
+            if ~all(ismember(requestedFields, availableFields))
+                missingFields = requestedFields(~ismember(requestedFields, availableFields));
+                error("MATLAB:zarrread:unknownField", ...
+                    "Unknown compound field requested: %s.", join(missingFields, ", "));
+            end
+        end
+
+        function data = convertCompoundData(obj, pythonDict, count, requestedFields)
+            % Convert Python dictionary containing compound data to a MATLAB struct array.
+            if nargin < 4
+                requestedFields = strings(1, 0);
+            end
+
+            if ~(isa(pythonDict, 'py.dict') || isstruct(pythonDict))
+                error("MATLAB:Zarr:ExpectedDictionary", ...
+                    "Expected structured data to be present as a dictionary.");
+            end
+
+            if isempty(requestedFields)
+                requestedFields = obj.validateCompoundFieldSelection(strings(1, 0));
+            end
+
+            compoundFields = obj.getRequestedCompoundFields(requestedFields);
+            unsupportedSubarrays = arrayfun(@(f) ~isempty(f.subarrayShape), compoundFields);
+            if any(unsupportedSubarrays)
+                error("MATLAB:Zarr:unsupportedCompoundField", ...
+                    "Compound fields with subarray shapes are not currently supported.");
+            end
+
+            if isempty(compoundFields)
+                data = struct([]);
+                return
+            end
+
+            targetShape = reshape(double(count), 1, []);
+            if isempty(targetShape)
+                targetShape = [1, 1];
+            elseif numel(targetShape) == 1
+                targetShape = [targetShape, 1];
+            end
+
+            fieldNames = cellstr(requestedFields);
+            flattenedValues = cell(1, numel(fieldNames));
+            for idx = 1:numel(fieldNames)
+                pyValue = obj.getCompoundFieldValue(pythonDict, fieldNames{idx});
+                flattenedValues{idx} = obj.convertCompoundFieldData( ...
+                    pyValue, compoundFields(idx).matlabType, targetShape);
+            end
+
+            numElements = prod(targetShape);
+            templateStruct = cell2struct(cell(1, numel(fieldNames)), fieldNames, 2);
+            structArray(1:numElements) = templateStruct; %#ok<AGROW>
+
+            for elemIdx = 1:numElements
+                for fieldIdx = 1:numel(fieldNames)
+                    fieldValues = flattenedValues{fieldIdx};
+                    structArray(elemIdx).(fieldNames{fieldIdx}) = fieldValues(elemIdx);
+                end
+            end
+
+            data = reshape(structArray, targetShape);
+            if numElements == 1
+                data = data(1);
+            end
+        end
+
+        function matlabData = convertCompoundFieldData(~, pythonFieldData, matlabType, targetShape)
+            % Convert an individual compound field from Python to MATLAB.
+            matlabType = string(matlabType);
+            if matlabType == ""
+                matlabType = "double";
+            end
+
+            targetShape = reshape(double(targetShape), 1, []);
+            if numel(targetShape) == 1
+                targetShape = [targetShape, 1];
+            end
+
+            if matlabType == "string"
+                if isa(pythonFieldData, 'py.list') || isa(pythonFieldData, 'py.tuple')
+                    cellValues = cell(pythonFieldData);
+                elseif isa(pythonFieldData, 'py.numpy.ndarray') && py.hasattr(pythonFieldData, 'tolist')
+                    cellValues = cell(py.list(pythonFieldData.tolist()));
+                else
+                    cellValues = {char(py.str(pythonFieldData))};
+                end
+
+                matlabData = reshape(string(cellValues), targetShape);
+                return
+            end
+
+            if isa(pythonFieldData, 'py.numpy.ndarray')
+                try
+                    flags = pythonFieldData.flags;
+                    if ~logical(py.getattr(flags, 'c_contiguous'))
+                        pythonFieldData = py.numpy.ascontiguousarray(pythonFieldData);
+                    end
+                catch
+                    % Let MATLAB try conversion directly if contiguity inspection fails.
+                end
+
+                % MATLAB does not reliably cast integer/float NumPy ndarrays
+                % directly. Convert through float64 first, then cast back.
+                pythonFieldData = py.numpy.asarray( ...
+                    pythonFieldData, pyargs('dtype', py.numpy.float64));
+                numericValues = double(pythonFieldData);
+            elseif isa(pythonFieldData, 'py.list') || isa(pythonFieldData, 'py.tuple')
+                cellValues = cell(pythonFieldData);
+                numericValues = zeros(numel(cellValues), 1);
+                for idx = 1:numel(cellValues)
+                    numericValues(idx) = double(cellValues{idx});
+                end
+            else
+                numericValues = double(pythonFieldData);
+            end
+
+            if matlabType == "logical"
+                matlabData = reshape(logical(numericValues), targetShape);
+            else
+                matlabData = reshape(cast(numericValues, char(matlabType)), targetShape);
+            end
+        end
+
+        function compoundFields = getRequestedCompoundFields(obj, requestedFields)
+            % Return compound field metadata in the requested order.
+            allFields = [obj.Datatype.CompoundFields{:}];
+            allFieldNames = string(arrayfun(@(f) char(f.name), allFields, ...
+                'UniformOutput', false));
+            compoundFields = repmat(allFields(1), 1, numel(requestedFields));
+            for idx = 1:numel(requestedFields)
+                fieldIdx = find(allFieldNames == requestedFields(idx), 1);
+                compoundFields(idx) = allFields(fieldIdx);
+            end
+        end
+
+        function pyValue = getCompoundFieldValue(~, pythonDict, fieldName)
+            % Read a single field value from a Python or MATLAB dictionary.
+            if isa(pythonDict, 'py.dict')
+                pyValue = pythonDict.get(py.str(fieldName));
+                if isa(pyValue, 'py.NoneType')
+                    error("MATLAB:zarrread:unknownField", ...
+                        "Compound field ""%s"" was not returned by the backend reader.", fieldName);
+                end
+                return
+            end
+
+            if ~isfield(pythonDict, fieldName)
+                error("MATLAB:zarrread:unknownField", ...
+                    "Compound field ""%s"" was not returned by the backend reader.", fieldName);
+            end
+
+            pyValue = pythonDict.(fieldName);
         end
 
         function compression = parseCompression(~,compression)
@@ -895,6 +1103,11 @@ classdef Zarr < handle
     end
 
     methods(Static, Access = private)
+        function metadataJSON = restoreSpecialV3AttributeNames(metadataJSON)
+            % Restore v3 attribute keys that MATLAB mangles during jsondecode/jsonencode.
+            metadataJSON = strrep(metadataJSON, '"x_ARRAY_DIMENSIONS"', '"_ARRAY_DIMENSIONS"');
+        end
+
         function codec = validateV3BytesCodec(codec)
             if string(codec.name) ~= "bytes"
                 error("MATLAB:Zarr:unsupportedV3CodecChain", ...

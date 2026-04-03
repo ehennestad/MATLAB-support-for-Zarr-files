@@ -18,8 +18,14 @@ classdef ZarrDatatype
     end
     
     properties (SetAccess = immutable, GetAccess=private, Hidden)
-        % Index into datatype arrays
+        % Index into datatype arrays (for simple types)
         Index (1,1) int32
+    end
+
+    properties (SetAccess = immutable, GetAccess=public, Hidden)
+        % Compound datatype metadata.
+        IsCompound (1,1) logical = false
+        CompoundFields = {}
     end
 
     properties (Dependent, SetAccess = immutable)
@@ -34,30 +40,54 @@ classdef ZarrDatatype
     methods (Hidden)
         % "Private" constructor - should not be used directly. 
         % Use from*Type() static methods instead.
-        function obj = ZarrDatatype(ind)
+        function obj = ZarrDatatype(ind, isCompound, compoundFields)
+            arguments
+                ind (1,1) int32 = 0
+                isCompound (1,1) logical = false
+                compoundFields = {}
+            end
+
             obj.Index = ind;
+            obj.IsCompound = isCompound;
+            obj.CompoundFields = compoundFields;
         end
     end
 
     methods
         function zType = get.ZarrType(obj)
             % Get the corresponding Zarr datatype
-            zType = ZarrDatatype.ZarrTypes(obj.Index);
+            if obj.IsCompound
+                zType = obj.CompoundFields;
+            else
+                zType = ZarrDatatype.ZarrTypes(obj.Index);
+            end
         end
 
         function tType = get.TensorstoreType(obj)
             % Get the corresponding Tensorstore datatype
-            tType = ZarrDatatype.TensorstoreTypes(obj.Index);
+            if obj.IsCompound
+                tType = "struct";
+            else
+                tType = ZarrDatatype.TensorstoreTypes(obj.Index);
+            end
         end
 
         function zType = get.ZarrV3Type(obj)
             % Get the corresponding Zarr v3 datatype
-            zType = ZarrDatatype.ZarrV3Types(obj.Index);
+            if obj.IsCompound
+                zType = obj.CompoundFields;
+            else
+                zType = ZarrDatatype.ZarrV3Types(obj.Index);
+            end
         end
 
         function mType = get.MATLABType(obj)
             % Get the corresponding MATLAB datatype
-            mType = ZarrDatatype.MATLABTypes(obj.Index);
+            if obj.IsCompound
+                mType = "struct";
+            else
+                mType = ZarrDatatype.MATLABTypes(obj.Index);
+            end
         end
     end
 
@@ -83,17 +113,26 @@ classdef ZarrDatatype
         end
 
         function obj = fromZarrType(zarrType)
-            % Create a datatype object based on Zarr datatype name
-            arguments
-                zarrType (1,1) string {ZarrDatatype.mustBeZarrType}
+            % Create a datatype object based on Zarr v2 metadata datatype.
+            if iscell(zarrType)
+                obj = ZarrDatatype.fromCompoundFieldSpecs(zarrType, 2);
+                return
             end
 
+            zarrType = string(zarrType);
+            ZarrDatatype.mustBeZarrType(zarrType);
             ind = find(zarrType == ZarrDatatype.ZarrTypes);
             obj = ZarrDatatype(ind);
         end
 
         function obj = fromV3Type(zarrType)
-            % Create a datatype object based on Zarr v3 datatype name
+            % Create a datatype object based on Zarr v3 metadata datatype.
+            if isstruct(zarrType)
+                obj = ZarrDatatype.fromStructuredV3Type(zarrType);
+                return
+            end
+
+            zarrType = string(zarrType);
             ind = find(zarrType == ZarrDatatype.ZarrV3Types);
             if isempty(ind)
                 error("MATLAB:ZarrDatatype:unsupportedV3Type", ...
@@ -105,7 +144,7 @@ classdef ZarrDatatype
         function obj = fromMetadataType(type, zarrFormat)
             % Create a datatype object based on metadata datatype and version
             arguments
-                type (1,1) string
+                type
                 zarrFormat (1,1) double {mustBeMember(zarrFormat, [2, 3])}
             end
 
@@ -127,9 +166,135 @@ classdef ZarrDatatype
         end
 
         function mustBeZarrType(type)
-            % Validator for Zarr v2 types
+            % Validator for Zarr v2 scalar types
             mustBeMember(type, ZarrDatatype.ZarrTypes)
         end
     end
 
+    methods (Static, Access = private)
+        function obj = fromStructuredV3Type(zarrType)
+            % Create a datatype object from a structured Zarr v3 data_type.
+            if ~isfield(zarrType, 'name') || string(zarrType.name) ~= "structured"
+                error("MATLAB:ZarrDatatype:unsupportedV3Type", ...
+                    "Unsupported Zarr v3 datatype extension.");
+            end
+
+            if ~isfield(zarrType, 'configuration') || ...
+                    ~isstruct(zarrType.configuration) || ...
+                    ~isfield(zarrType.configuration, 'fields')
+                error("MATLAB:ZarrDatatype:invalidCompoundType", ...
+                    "Structured Zarr v3 datatypes must define configuration.fields.");
+            end
+
+            obj = ZarrDatatype.fromCompoundFieldSpecs(zarrType.configuration.fields, 3);
+        end
+
+        function obj = fromCompoundFieldSpecs(fieldSpecs, zarrFormat)
+            if ~iscell(fieldSpecs)
+                error("MATLAB:ZarrDatatype:invalidCompoundType", ...
+                    "Compound datatype metadata must be a cell array of field definitions.");
+            end
+
+            compoundFields = cell(1, numel(fieldSpecs));
+            for idx = 1:numel(fieldSpecs)
+                [fieldName, fieldType, subarrayShape] = ...
+                    ZarrDatatype.parseCompoundFieldSpec(fieldSpecs{idx});
+
+                matlabType = ZarrDatatype.compoundFieldTypeToMATLABType(fieldType, zarrFormat);
+                compoundFields{idx} = struct( ...
+                    'name', fieldName, ...
+                    'storageType', fieldType, ...
+                    'matlabType', matlabType, ...
+                    'subarrayShape', subarrayShape);
+            end
+
+            obj = ZarrDatatype(0, true, compoundFields);
+        end
+
+        function [fieldName, fieldType, subarrayShape] = parseCompoundFieldSpec(fieldSpec)
+            if ~(iscell(fieldSpec) && ismember(numel(fieldSpec), [2, 3]))
+                error("MATLAB:ZarrDatatype:invalidCompoundField", ...
+                    "Each compound field must be a 2- or 3-element cell array.");
+            end
+
+            fieldName = string(fieldSpec{1});
+            if strlength(fieldName) == 0
+                error("MATLAB:ZarrDatatype:invalidCompoundField", ...
+                    "Compound field names must be non-empty text values.");
+            end
+
+            fieldType = fieldSpec{2};
+            if numel(fieldSpec) == 3
+                subarrayShape = ZarrDatatype.normalizeSubarrayShape(fieldSpec{3});
+            else
+                subarrayShape = [];
+            end
+        end
+
+        function subarrayShape = normalizeSubarrayShape(rawShape)
+            if isempty(rawShape)
+                subarrayShape = [];
+                return
+            end
+
+            if iscell(rawShape)
+                try
+                    subarrayShape = cellfun(@double, rawShape);
+                catch
+                    error("MATLAB:ZarrDatatype:invalidCompoundField", ...
+                        "Compound subarray shapes must be numeric.");
+                end
+            else
+                subarrayShape = double(rawShape);
+            end
+
+            subarrayShape = reshape(subarrayShape, 1, []);
+            if any(~isfinite(subarrayShape)) || any(subarrayShape < 1) || ...
+                    any(subarrayShape ~= fix(subarrayShape))
+                error("MATLAB:ZarrDatatype:invalidCompoundField", ...
+                    "Compound subarray shapes must contain positive integers.");
+            end
+        end
+
+        function matlabType = compoundFieldTypeToMATLABType(fieldType, zarrFormat)
+            if isstruct(fieldType) || iscell(fieldType)
+                error("MATLAB:ZarrDatatype:unsupportedCompoundFieldType", ...
+                    "Nested or non-scalar compound field types are not supported.");
+            end
+
+            fieldType = string(fieldType);
+            if zarrFormat == 2
+                matlabType = ZarrDatatype.zarrV2FieldTypeToMATLABType(fieldType);
+                return
+            end
+
+            matlabType = ZarrDatatype.zarrV3FieldTypeToMATLABType(fieldType);
+        end
+
+        function matlabType = zarrV2FieldTypeToMATLABType(fieldType)
+            if any(fieldType == ZarrDatatype.ZarrTypes)
+                idx = find(fieldType == ZarrDatatype.ZarrTypes, 1);
+                matlabType = ZarrDatatype.MATLABTypes(idx);
+                return
+            end
+
+            if any(startsWith(fieldType, ["<U", ">U", "|U", "<S", ">S", "|S"]))
+                matlabType = "string";
+                return
+            end
+
+            error("MATLAB:ZarrDatatype:unsupportedCompoundFieldType", ...
+                "Unsupported Zarr v2 compound field type ""%s"".", fieldType);
+        end
+
+        function matlabType = zarrV3FieldTypeToMATLABType(fieldType)
+            idx = find(fieldType == ZarrDatatype.ZarrV3Types, 1);
+            if isempty(idx)
+                error("MATLAB:ZarrDatatype:unsupportedCompoundFieldType", ...
+                    "Unsupported Zarr v3 compound field type ""%s"".", fieldType);
+            end
+
+            matlabType = ZarrDatatype.MATLABTypes(idx);
+        end
+    end
 end
