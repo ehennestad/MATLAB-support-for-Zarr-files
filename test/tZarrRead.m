@@ -82,16 +82,9 @@ classdef tZarrRead < matlab.unittest.TestCase
         function verifyReadScalarData(testcase)
             zpath = testcase.ArrPathReadScalar; % data is 0
             expectedData = 0;
-            try
-                actualData = zarrread(zpath);
-                testcase.verifyEqual(actualData, expectedData)
-            catch exception
-                diagnostic = sprintf([...
-                    'Failed to read scalar dataset. '...
-                    'Caused by: %s'...
-                    ], exception.message);
-                testcase.verifyFail(diagnostic)
-            end
+
+            actualData = testcase.verifyWarningFree(@()zarrread(zpath));
+            testcase.verifyEqual(actualData, expectedData)
         end
 
         function verifyArrayDataRelativePath(testcase)
