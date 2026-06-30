@@ -100,6 +100,14 @@ def readZarr (kvstore_schema, starts, ends, strides):
         'kvstore': kvstore_schema,
     }).result()
     
+    # Convert integer inputs to single-element lists
+    if isinstance(starts, int):
+        starts = [starts]
+    if isinstance(ends, int):
+        ends = [ends]
+    if isinstance(strides, int):
+        strides = [strides]
+
     # Construct the indexing slices
     slices = tuple(slice(start, end, stride) for start, end, stride in zip(starts, ends, strides))
 

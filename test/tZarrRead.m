@@ -9,6 +9,7 @@ classdef tZarrRead < matlab.unittest.TestCase
         ArrPathRead = "dataFiles/grp_v2/arr_v2"
         ArrPathReadSmall = "dataFiles/grp_v2/smallArr"
         ArrPathReadVector = "dataFiles/grp_v2/vectorData"
+        ArrPathReadScalar = "dataFiles/grp_v2/scalarData"
         ArrPathReadV3 = "dataFiles/grp_v3/arr_v3"
 
         ExpData = load(fullfile(pwd,"dataFiles","expZarrArrData.mat"))
@@ -76,6 +77,14 @@ classdef tZarrRead < matlab.unittest.TestCase
             actData = zarrread(zpath, Start=2, Stride=3, Count=2);
             testcase.verifyEqual(actData,expData,...
                 'Failed to verify using scalar Start, Stride, and Count.');
+        end
+
+        function verifyReadScalarData(testcase)
+            zpath = testcase.ArrPathReadScalar; % data is 0
+            expectedData = 0;
+
+            actualData = testcase.verifyWarningFree(@()zarrread(zpath));
+            testcase.verifyEqual(actualData, expectedData)
         end
 
         function verifyArrayDataRelativePath(testcase)
